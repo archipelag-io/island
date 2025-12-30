@@ -14,7 +14,7 @@ mod wasm;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
@@ -136,6 +136,9 @@ async fn run_wasm_test(wasm_path: &str, input: &str) -> Result<()> {
             }
             WasmOutput::Exit(code) => {
                 info!("WASM exit code: {}", code);
+            }
+            WasmOutput::Timeout => {
+                error!("WASM execution timed out");
             }
         }
     }

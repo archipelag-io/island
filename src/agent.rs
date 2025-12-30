@@ -193,6 +193,7 @@ async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob) -> Result<()> {
     let wasm_config = WasmConfig {
         module_path: wasm_path,
         input: input_json,
+        timeout_seconds: DEFAULT_WASM_TIMEOUT_SECS,
         ..Default::default()
     };
 
@@ -208,13 +209,21 @@ async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob) -> Result<()> {
     });
 
     // Process WASM output
-    let (exit_code, token_count) = process_wasm_output(nats, job_id, &mut output_rx).await?;
+    let (exit_code, token_count, timed_out) = process_wasm_output(nats, job_id, &mut output_rx).await?;
 
     // Wait for WASM to fully finish
     let _exit_code = wasm_handle.await??;
 
     // Send final status
-    if exit_code == 0 {
+    if timed_out {
+        nats.publish_status(
+            job_id,
+            "failed",
+            Some(format!("Timeout: job exceeded {}s limit", DEFAULT_WASM_TIMEOUT_SECS)),
+        )
+        .await?;
+        warn!("WASM job {} failed: timeout", job_id);
+    } else if exit_code == 0 {
         nats.publish_status(job_id, "succeeded", None).await?;
         info!("WASM job {} succeeded, generated {} tokens", job_id, token_count);
     } else {
@@ -225,16 +234,20 @@ async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob) -> Result<()> {
     Ok(())
 }
 
+/// Default timeout for WASM workloads (60 seconds)
+const DEFAULT_WASM_TIMEOUT_SECS: u64 = 60;
+
 /// Process WASM output stream
 async fn process_wasm_output(
     nats: &NatsAgent,
     job_id: &str,
     output_rx: &mut mpsc::Receiver<WasmOutput>,
-) -> Result<(i32, u32)> {
+) -> Result<(i32, u32, bool)> {
     let mut seq: u64 = 0;
     let mut token_count: u32 = 0;
     let mut exit_code: i32 = 0;
     let mut streaming_started = false;
+    let mut timed_out = false;
 
     while let Some(output) = output_rx.recv().await {
         match output {
@@ -285,11 +298,19 @@ async fn process_wasm_output(
                 exit_code = code;
                 debug!("WASM exited with code: {}", code);
             }
+            WasmOutput::Timeout => {
+                warn!("WASM timed out after {}s", DEFAULT_WASM_TIMEOUT_SECS);
+                timed_out = true;
+                exit_code = -1;
+            }
         }
     }
 
-    Ok((exit_code, token_count))
+    Ok((exit_code, token_count, timed_out))
 }
+
+/// Default timeout for container workloads (5 minutes)
+const DEFAULT_CONTAINER_TIMEOUT_SECS: u64 = 300;
 
 /// Execute a container workload
 async fn execute_container_job(
@@ -315,6 +336,7 @@ async fn execute_container_job(
         image,
         input: input_json,
         gpu_devices: config.workload.gpu_devices.clone(),
+        timeout_seconds: DEFAULT_CONTAINER_TIMEOUT_SECS,
     };
 
     // Create channel for container output
@@ -331,6 +353,7 @@ async fn execute_container_job(
     let mut buffer = String::new();
     let mut token_count: u32 = 0;
     let mut streaming_started = false;
+    let mut timed_out = false;
 
     // Process container output and forward to NATS
     while let Some(output) = output_rx.recv().await {
@@ -390,6 +413,11 @@ async fn execute_container_job(
                 debug!("Container exited with code: {}", code);
                 break;
             }
+            ContainerOutput::Timeout => {
+                warn!("Container timed out after {}s", DEFAULT_CONTAINER_TIMEOUT_SECS);
+                timed_out = true;
+                break;
+            }
         }
     }
 
@@ -397,7 +425,15 @@ async fn execute_container_job(
     let exit_code = container_handle.await??;
 
     // Send final status
-    if exit_code == 0 {
+    if timed_out {
+        nats.publish_status(
+            job_id,
+            "failed",
+            Some(format!("Timeout: job exceeded {}s limit", DEFAULT_CONTAINER_TIMEOUT_SECS)),
+        )
+        .await?;
+        warn!("Job {} failed: timeout", job_id);
+    } else if exit_code == 0 {
         nats.publish_output(job_id, seq + 1, "", true).await?;
         nats.publish_status(job_id, "succeeded", None).await?;
         info!("Job {} succeeded, generated {} tokens", job_id, token_count);

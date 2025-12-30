@@ -25,6 +25,7 @@ pub async fn run_test_job(docker: &Docker, config: &AgentConfig, prompt: &str) -
         image: config.workload.llm_chat_image.clone(),
         input: input_json,
         gpu_devices: config.workload.gpu_devices.clone(),
+        timeout_seconds: 300, // 5 minute timeout for test jobs
     };
 
     info!("Starting container: {}", container_config.image);

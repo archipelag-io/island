@@ -5,8 +5,10 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tokio::time::timeout;
+use tracing::{debug, info, warn};
 use wasmtime::*;
 use wasmtime_wasi::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::preview1::WasiP1Ctx;
@@ -18,6 +20,8 @@ pub enum WasmOutput {
     Stdout(String),
     Stderr(String),
     Exit(i32),
+    /// WASM execution timed out or exceeded fuel limit
+    Timeout,
 }
 
 /// Configuration for WASM execution
@@ -32,6 +36,8 @@ pub struct WasmConfig {
     pub max_memory_bytes: u64,
     /// Maximum fuel (instructions) - None for unlimited
     pub max_fuel: Option<u64>,
+    /// Timeout in seconds (default: 60 seconds for WASM)
+    pub timeout_seconds: u64,
 }
 
 impl Default for WasmConfig {
@@ -41,6 +47,7 @@ impl Default for WasmConfig {
             input: String::new(),
             max_memory_bytes: 256 * 1024 * 1024, // 256MB
             max_fuel: Some(100_000_000_000),     // 100 billion instructions
+            timeout_seconds: 60,                  // 1 minute timeout for WASM
         }
     }
 }
@@ -76,7 +83,9 @@ impl WasmExecutor {
         Ok(Self { engine })
     }
 
-    /// Run a WASM module with the given configuration
+    /// Run a WASM module with the given configuration.
+    ///
+    /// The execution will be terminated if it exceeds the configured timeout.
     pub async fn run(
         &self,
         config: WasmConfig,
@@ -86,24 +95,44 @@ impl WasmExecutor {
         let module_path = config.module_path.clone();
         let input = config.input.clone();
         let max_fuel = config.max_fuel;
+        let timeout_duration = Duration::from_secs(config.timeout_seconds);
 
-        // Run in blocking task since wasmtime operations are sync
-        let result = tokio::task::spawn_blocking(move || {
-            Self::run_sync(&engine, &module_path, &input, max_fuel)
+        // Run in blocking task since wasmtime operations are sync, with timeout
+        let run_result = timeout(timeout_duration, async {
+            tokio::task::spawn_blocking(move || {
+                Self::run_sync(&engine, &module_path, &input, max_fuel)
+            })
+            .await
+            .context("WASM execution task failed")?
         })
-        .await
-        .context("WASM execution task failed")??;
+        .await;
 
-        // Send output
-        if !result.stdout.is_empty() {
-            let _ = output_tx.send(WasmOutput::Stdout(result.stdout)).await;
+        match run_result {
+            Ok(Ok(result)) => {
+                // Normal completion
+                if !result.stdout.is_empty() {
+                    let _ = output_tx.send(WasmOutput::Stdout(result.stdout)).await;
+                }
+                if !result.stderr.is_empty() {
+                    let _ = output_tx.send(WasmOutput::Stderr(result.stderr)).await;
+                }
+                let _ = output_tx.send(WasmOutput::Exit(result.exit_code)).await;
+                Ok(result.exit_code)
+            }
+            Ok(Err(e)) => {
+                // Execution error
+                Err(e)
+            }
+            Err(_) => {
+                // Timeout
+                warn!(
+                    "WASM execution exceeded timeout ({}s)",
+                    config.timeout_seconds
+                );
+                let _ = output_tx.send(WasmOutput::Timeout).await;
+                Ok(-1)
+            }
         }
-        if !result.stderr.is_empty() {
-            let _ = output_tx.send(WasmOutput::Stderr(result.stderr)).await;
-        }
-        let _ = output_tx.send(WasmOutput::Exit(result.exit_code)).await;
-
-        Ok(result.exit_code)
     }
 
     /// Synchronous WASM execution for core modules (not components)
