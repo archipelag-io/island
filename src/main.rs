@@ -4,10 +4,12 @@
 //! by the coordinator. It manages container lifecycle, streams output,
 //! and reports health/status.
 
+mod agent;
 mod config;
 mod docker;
 mod executor;
 mod messages;
+mod nats;
 
 use anyhow::Result;
 use clap::Parser;
@@ -25,6 +27,10 @@ struct Args {
     /// Run a single job for testing (bypasses NATS)
     #[arg(long)]
     test_job: Option<String>,
+
+    /// Run in agent mode (connect to NATS and wait for jobs)
+    #[arg(long)]
+    agent: bool,
 }
 
 #[tokio::main]
@@ -53,14 +59,17 @@ async fn main() -> Result<()> {
         return executor::run_test_job(&docker, &config, &prompt).await;
     }
 
-    // TODO: Main agent loop
-    // 1. Connect to NATS
-    // 2. Register with coordinator
-    // 3. Send heartbeats
-    // 4. Listen for job assignments
-    // 5. Execute jobs and stream output
+    // If agent mode, run the full agent loop
+    if args.agent {
+        info!("Starting agent mode");
+        let agent = agent::Agent::new(config, docker).await?;
+        return agent.run().await;
+    }
 
-    info!("Agent ready. Use --test-job to run a test, or implement NATS integration.");
+    // Default: show help
+    info!("Agent ready. Options:");
+    info!("  --test-job <PROMPT>  Run a test job with the given prompt");
+    info!("  --agent              Run in agent mode (connect to NATS)");
 
     Ok(())
 }

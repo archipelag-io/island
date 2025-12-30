@@ -40,6 +40,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Futures utilities
 futures-util = "0.3"
 
+# System info
+num_cpus = "1.16"
+
 # GPU detection (NVIDIA)
 # nvml-wrapper = "0.9"  # Uncomment when needed
 
