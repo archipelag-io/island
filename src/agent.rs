@@ -3,9 +3,10 @@
 //! Coordinates NATS connection, job execution, and heartbeats.
 
 use crate::config::AgentConfig;
-use crate::docker::{self, ContainerConfig};
+use crate::docker::{self, ContainerConfig, ContainerOutput};
 use crate::messages::WorkloadOutput;
 use crate::nats::{self, AssignJob, HostCapabilities, NatsAgent};
+use crate::wasm::{WasmConfig, WasmExecutor, WasmOutput};
 use anyhow::{Context, Result};
 use bollard::Docker;
 use futures_util::StreamExt;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// The main agent that coordinates all activity
 pub struct Agent {
@@ -151,7 +152,7 @@ impl Agent {
     }
 }
 
-/// Execute a single job
+/// Execute a single job (routes to container or WASM executor)
 async fn execute_job(
     docker: &Docker,
     nats: &NatsAgent,
@@ -164,58 +165,220 @@ async fn execute_job(
     // Notify started
     nats.publish_status(job_id, "started", None).await?;
 
+    // Route based on runtime type
+    match job.runtime_type.as_str() {
+        "wasm" => execute_wasm_job(nats, &job).await,
+        "container" | _ => execute_container_job(docker, nats, config, &job).await,
+    }
+}
+
+/// Execute a WASM workload
+async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob) -> Result<()> {
+    let job_id = &job.job_id;
+
+    let wasm_url = job
+        .wasm_url
+        .as_ref()
+        .context("WASM workload missing wasm_url")?;
+
+    info!("Executing WASM workload: {}", wasm_url);
+
+    // TODO: Download WASM module from URL and cache it
+    // For now, assume wasm_url is a local path for testing
+    let wasm_path = wasm_url.clone();
+
+    // Prepare input
+    let input_json = serde_json::to_string(&job.input).context("Failed to serialize job input")?;
+
+    let wasm_config = WasmConfig {
+        module_path: wasm_path,
+        input: input_json,
+        ..Default::default()
+    };
+
+    // Create WASM executor
+    let executor = WasmExecutor::new()?;
+
+    // Create channel for WASM output
+    let (output_tx, mut output_rx) = mpsc::channel::<WasmOutput>(256);
+
+    // Spawn WASM runner
+    let wasm_handle = tokio::spawn(async move {
+        executor.run(wasm_config, output_tx).await
+    });
+
+    // Process WASM output
+    let (exit_code, token_count) = process_wasm_output(nats, job_id, &mut output_rx).await?;
+
+    // Wait for WASM to fully finish
+    let _exit_code = wasm_handle.await??;
+
+    // Send final status
+    if exit_code == 0 {
+        nats.publish_status(job_id, "succeeded", None).await?;
+        info!("WASM job {} succeeded, generated {} tokens", job_id, token_count);
+    } else {
+        nats.publish_status(job_id, "failed", Some(format!("Exit code: {}", exit_code)))
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Process WASM output stream
+async fn process_wasm_output(
+    nats: &NatsAgent,
+    job_id: &str,
+    output_rx: &mut mpsc::Receiver<WasmOutput>,
+) -> Result<(i32, u32)> {
+    let mut seq: u64 = 0;
+    let mut token_count: u32 = 0;
+    let mut exit_code: i32 = 0;
+    let mut streaming_started = false;
+
+    while let Some(output) = output_rx.recv().await {
+        match output {
+            WasmOutput::Stdout(text) => {
+                // Parse JSON lines from stdout
+                for line in text.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+
+                    if let Ok(workload_output) = serde_json::from_str::<WorkloadOutput>(line) {
+                        match &workload_output {
+                            WorkloadOutput::Status { message } => {
+                                debug!("WASM status: {}", message);
+                                if !streaming_started {
+                                    nats.publish_status(job_id, "streaming", None).await?;
+                                    streaming_started = true;
+                                }
+                            }
+                            WorkloadOutput::Token { content } => {
+                                token_count += 1;
+                                seq += 1;
+                                nats.publish_output(job_id, seq, content, false).await?;
+                            }
+                            WorkloadOutput::Done { usage } => {
+                                debug!("WASM done: {:?}", usage);
+                                nats.publish_output(job_id, seq + 1, "", true).await?;
+                            }
+                            WorkloadOutput::Error { message } => {
+                                error!("WASM error: {}", message);
+                            }
+                        }
+                    }
+                }
+            }
+            WasmOutput::Stderr(text) => {
+                debug!("WASM stderr: {}", text);
+            }
+            WasmOutput::Exit(code) => {
+                exit_code = code;
+                debug!("WASM exited with code: {}", code);
+            }
+        }
+    }
+
+    Ok((exit_code, token_count))
+}
+
+/// Execute a container workload
+async fn execute_container_job(
+    docker: &Docker,
+    nats: &NatsAgent,
+    config: &AgentConfig,
+    job: &AssignJob,
+) -> Result<()> {
+    let job_id = &job.job_id;
+
+    // Use image from job assignment, fall back to config
+    let image = job
+        .container_image
+        .clone()
+        .unwrap_or_else(|| config.workload.llm_chat_image.clone());
+
+    info!("Executing container workload: {}", image);
+
     // Prepare container config
     let input_json = serde_json::to_string(&job.input).context("Failed to serialize job input")?;
 
     let container_config = ContainerConfig {
-        image: config.workload.llm_chat_image.clone(),
+        image,
         input: input_json,
         gpu_devices: config.workload.gpu_devices.clone(),
     };
 
-    // Track output sequence number
+    // Create channel for container output
+    let (output_tx, mut output_rx) = mpsc::channel::<ContainerOutput>(256);
+
+    // Spawn container runner
+    let docker_clone = docker.clone();
+    let container_handle = tokio::spawn(async move {
+        docker::run_container_streaming(&docker_clone, container_config, output_tx).await
+    });
+
+    // Track output
     let mut seq: u64 = 0;
     let mut buffer = String::new();
     let mut token_count: u32 = 0;
+    let mut streaming_started = false;
 
-    // Notify streaming
-    nats.publish_status(job_id, "streaming", None).await?;
+    // Process container output and forward to NATS
+    while let Some(output) = output_rx.recv().await {
+        match output {
+            ContainerOutput::Stdout(chunk) => {
+                buffer.push_str(&chunk);
 
-    // Run container
-    let exit_code = docker::run_container(docker, container_config, |chunk| {
-        buffer.push_str(&chunk);
+                // Process complete JSON lines
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
 
-        // Process complete lines
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            // Parse and forward output
-            if let Ok(output) = serde_json::from_str::<WorkloadOutput>(&line) {
-                match output {
-                    WorkloadOutput::Token { content: _ } => {
-                        token_count += 1;
-                        // Fire and forget - we're in a sync callback
-                        // In production, you'd want to batch these
+                    if line.trim().is_empty() {
+                        continue;
                     }
-                    WorkloadOutput::Done { .. } => {
-                        // Final output handled below
+
+                    // Parse workload output
+                    if let Ok(workload_output) = serde_json::from_str::<WorkloadOutput>(&line) {
+                        match &workload_output {
+                            WorkloadOutput::Status { message } => {
+                                debug!("Workload status: {}", message);
+                                if message == "ready" && !streaming_started {
+                                    nats.publish_status(job_id, "streaming", None).await?;
+                                    streaming_started = true;
+                                }
+                            }
+                            WorkloadOutput::Token { content } => {
+                                token_count += 1;
+                                seq += 1;
+                                // Publish token to NATS
+                                nats.publish_output(job_id, seq, content, false).await?;
+                            }
+                            WorkloadOutput::Done { usage } => {
+                                debug!("Workload done: {:?}", usage);
+                            }
+                            WorkloadOutput::Error { message } => {
+                                error!("Workload error: {}", message);
+                            }
+                        }
+                    } else {
+                        debug!("Unparsed output line: {}", line);
                     }
-                    _ => {}
                 }
             }
-
-            // Forward raw line to coordinator
-            seq += 1;
-            // Note: Can't await here since we're in a sync callback
-            // This is a limitation - see comment below
+            ContainerOutput::Stderr(text) => {
+                debug!("Container stderr: {}", text);
+            }
+            ContainerOutput::Exit(code) => {
+                debug!("Container exited with code: {}", code);
+                break;
+            }
         }
-    })
-    .await?;
+    }
+
+    // Wait for container to fully finish
+    let exit_code = container_handle.await??;
 
     // Send final status
     if exit_code == 0 {

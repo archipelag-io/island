@@ -50,8 +50,10 @@ impl Default for AgentConfig {
             },
             docker: DockerConfig { socket: None },
             workload: WorkloadConfig {
-                llm_chat_image: "llm-chat:latest".to_string(),
-                gpu_devices: Some(vec!["0".to_string()]),
+                // Use mock image by default for development
+                llm_chat_image: "archipelag-llm-chat-mock:latest".to_string(),
+                // No GPU needed for mock
+                gpu_devices: None,
             },
         }
     }

@@ -63,6 +63,18 @@ pub struct AssignJob {
     pub workload_id: String,
     pub input: serde_json::Value,
     pub lease_expires: i64,
+    /// Runtime type: "container" or "wasm"
+    #[serde(default = "default_runtime_type")]
+    pub runtime_type: String,
+    /// For container workloads
+    pub container_image: Option<String>,
+    /// For WASM workloads
+    pub wasm_url: Option<String>,
+    pub wasm_hash: Option<String>,
+}
+
+fn default_runtime_type() -> String {
+    "container".to_string()
 }
 
 /// Job status update

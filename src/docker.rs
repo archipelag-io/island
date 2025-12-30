@@ -8,6 +8,7 @@ use bollard::container::{
 use bollard::models::{DeviceRequest, HostConfig};
 use bollard::Docker;
 use futures_util::StreamExt;
+use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 /// Connect to the Docker daemon
@@ -32,15 +33,20 @@ pub struct ContainerConfig {
     pub gpu_devices: Option<Vec<String>>,
 }
 
-/// Run a container and stream its output
-pub async fn run_container<F>(
+/// Output chunk from container
+#[derive(Debug)]
+pub enum ContainerOutput {
+    Stdout(String),
+    Stderr(String),
+    Exit(i64),
+}
+
+/// Run a container and stream its output through a channel
+pub async fn run_container_streaming(
     docker: &Docker,
     config: ContainerConfig,
-    mut on_output: F,
-) -> Result<i64>
-where
-    F: FnMut(String),
-{
+    output_tx: mpsc::Sender<ContainerOutput>,
+) -> Result<i64> {
     let container_name = format!("archipelag-job-{}", uuid::Uuid::new_v4());
 
     // Configure GPU access
@@ -117,17 +123,18 @@ where
         .context("Failed to write to container stdin")?;
     attached.input.shutdown().await?;
 
-    // Read output
+    // Read output and send to channel
     while let Some(output) = attached.output.next().await {
         match output {
             Ok(LogOutput::StdOut { message }) => {
                 if let Ok(text) = String::from_utf8(message.to_vec()) {
-                    on_output(text);
+                    let _ = output_tx.send(ContainerOutput::Stdout(text)).await;
                 }
             }
             Ok(LogOutput::StdErr { message }) => {
                 if let Ok(text) = String::from_utf8(message.to_vec()) {
                     debug!("Container stderr: {}", text);
+                    let _ = output_tx.send(ContainerOutput::Stderr(text)).await;
                 }
             }
             Err(e) => {
@@ -149,6 +156,9 @@ where
         -1
     };
 
+    // Send exit code
+    let _ = output_tx.send(ContainerOutput::Exit(exit_code)).await;
+
     // Clean up container
     let remove_options = RemoveContainerOptions {
         force: true,
@@ -162,4 +172,33 @@ where
     debug!("Container {} finished with exit code {}", container_name, exit_code);
 
     Ok(exit_code)
+}
+
+/// Run a container with a sync callback (for backwards compatibility)
+pub async fn run_container<F>(
+    docker: &Docker,
+    config: ContainerConfig,
+    mut on_output: F,
+) -> Result<i64>
+where
+    F: FnMut(String),
+{
+    let (tx, mut rx) = mpsc::channel(256);
+
+    // Spawn the container runner
+    let docker_clone = docker.clone();
+    let runner = tokio::spawn(async move {
+        run_container_streaming(&docker_clone, config, tx).await
+    });
+
+    // Process output
+    while let Some(output) = rx.recv().await {
+        match output {
+            ContainerOutput::Stdout(text) => on_output(text),
+            ContainerOutput::Stderr(_) => {}
+            ContainerOutput::Exit(_) => break,
+        }
+    }
+
+    runner.await?
 }
