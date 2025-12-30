@@ -1,0 +1,22 @@
+# Archipelag.io Node Agent Configuration
+# Copy this to config.toml and customize
+
+# Host ID (optional, auto-generated if not set)
+# host_id = "my-gaming-rig"
+
+[coordinator]
+# NATS server URL
+nats_url = "nats://localhost:4222"
+
+[docker]
+# Optional: custom Docker socket path
+# Default: unix:///var/run/docker.sock (Linux) or npipe:////./pipe/docker_engine (Windows)
+# socket = "unix:///var/run/docker.sock"
+
+[workload]
+# Container image for LLM chat workload
+llm_chat_image = "llm-chat:latest"
+
+# GPU devices to use (NVIDIA device IDs)
+# Use ["0"] for single GPU, ["0", "1"] for multi-GPU
+gpu_devices = ["0"]

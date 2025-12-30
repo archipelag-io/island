@@ -1,0 +1,51 @@
+[package]
+name = "archipelag-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Node agent for archipelag.io distributed compute network"
+authors = ["archipelag.io <hello@archipelag.io>"]
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Docker client
+bollard = "0.18"
+
+# NATS client
+async-nats = "0.38"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Configuration
+config = "0.14"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# UUID for host/job IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Futures utilities
+futures-util = "0.3"
+
+# GPU detection (NVIDIA)
+# nvml-wrapper = "0.9"  # Uncomment when needed
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+strip = true
