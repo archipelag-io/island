@@ -259,8 +259,16 @@ async fn process_wasm_output(
                                 seq += 1;
                                 nats.publish_output(job_id, seq, content, false).await?;
                             }
-                            WorkloadOutput::Done { usage } => {
-                                debug!("WASM done: {:?}", usage);
+                            WorkloadOutput::Progress { step, total } => {
+                                debug!("WASM progress: {}/{}", step, total);
+                                nats.publish_progress(job_id, *step, *total).await?;
+                            }
+                            WorkloadOutput::Image { data, format, width, height } => {
+                                info!("WASM image: {}x{} {}", width, height, format);
+                                nats.publish_image(job_id, data, format, *width, *height, None).await?;
+                            }
+                            WorkloadOutput::Done { usage, seed } => {
+                                debug!("WASM done: usage={:?}, seed={:?}", usage, seed);
                                 nats.publish_output(job_id, seq + 1, "", true).await?;
                             }
                             WorkloadOutput::Error { message } => {
@@ -355,8 +363,16 @@ async fn execute_container_job(
                                 // Publish token to NATS
                                 nats.publish_output(job_id, seq, content, false).await?;
                             }
-                            WorkloadOutput::Done { usage } => {
-                                debug!("Workload done: {:?}", usage);
+                            WorkloadOutput::Progress { step, total } => {
+                                debug!("Workload progress: {}/{}", step, total);
+                                nats.publish_progress(job_id, *step, *total).await?;
+                            }
+                            WorkloadOutput::Image { data, format, width, height } => {
+                                info!("Received image: {}x{} {}", width, height, format);
+                                nats.publish_image(job_id, data, format, *width, *height, None).await?;
+                            }
+                            WorkloadOutput::Done { usage, seed } => {
+                                debug!("Workload done: usage={:?}, seed={:?}", usage, seed);
                             }
                             WorkloadOutput::Error { message } => {
                                 error!("Workload error: {}", message);

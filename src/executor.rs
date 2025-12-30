@@ -57,13 +57,21 @@ pub async fn run_test_job(docker: &Docker, config: &AgentConfig, prompt: &str) -
                         use std::io::Write;
                         std::io::stdout().flush().ok();
                     }
-                    WorkloadOutput::Done { usage } => {
+                    WorkloadOutput::Progress { step, total } => {
+                        info!("Progress: {}/{}", step, total);
+                    }
+                    WorkloadOutput::Image { data: _, format, width, height } => {
+                        info!("Image generated: {}x{} {}", width, height, format);
+                    }
+                    WorkloadOutput::Done { usage, seed } => {
                         println!(); // Final newline
                         if let Some(usage) = usage {
                             info!(
                                 "Done. Tokens: {}",
                                 usage.completion_tokens.unwrap_or(0)
                             );
+                        } else if let Some(s) = seed {
+                            info!("Done. Seed: {}", s);
                         } else {
                             info!("Done.");
                         }

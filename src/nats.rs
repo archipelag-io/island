@@ -87,13 +87,33 @@ pub struct JobStatus {
     pub timestamp: i64,
 }
 
-/// Job output chunk
+/// Job output chunk (for streaming text)
 #[derive(Debug, Serialize)]
 pub struct JobOutput {
     pub job_id: String,
     pub seq: u64,
     pub chunk: String,
     pub is_final: bool,
+}
+
+/// Job output with image data
+#[derive(Debug, Serialize)]
+pub struct JobImageOutput {
+    pub job_id: String,
+    pub image_data: String,  // base64 encoded
+    pub format: String,      // "png", "jpeg", etc.
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+/// Job progress update
+#[derive(Debug, Serialize)]
+pub struct JobProgress {
+    pub job_id: String,
+    pub step: u32,
+    pub total: u32,
 }
 
 /// NATS connection wrapper with agent-specific functionality
@@ -195,7 +215,7 @@ impl NatsAgent {
         Ok(())
     }
 
-    /// Publish job output chunk
+    /// Publish job output chunk (for text streaming)
     pub async fn publish_output(&self, job_id: &str, seq: u64, chunk: &str, is_final: bool) -> Result<()> {
         let msg = JobOutput {
             job_id: job_id.to_string(),
@@ -210,6 +230,49 @@ impl NatsAgent {
             .publish(subjects::output(&self.host_id), payload.into())
             .await
             .context("Failed to publish output")?;
+
+        Ok(())
+    }
+
+    /// Publish job progress update
+    pub async fn publish_progress(&self, job_id: &str, step: u32, total: u32) -> Result<()> {
+        let msg = JobProgress {
+            job_id: job_id.to_string(),
+            step,
+            total,
+        };
+
+        let payload = serde_json::to_vec(&msg).context("Failed to serialize progress")?;
+
+        // Use a separate subject for progress updates
+        let subject = format!("host.{}.progress", self.host_id);
+        self.client
+            .publish(subject, payload.into())
+            .await
+            .context("Failed to publish progress")?;
+
+        Ok(())
+    }
+
+    /// Publish image output
+    pub async fn publish_image(&self, job_id: &str, image_data: &str, format: &str, width: u32, height: u32, seed: Option<u64>) -> Result<()> {
+        let msg = JobImageOutput {
+            job_id: job_id.to_string(),
+            image_data: image_data.to_string(),
+            format: format.to_string(),
+            width,
+            height,
+            seed,
+        };
+
+        let payload = serde_json::to_vec(&msg).context("Failed to serialize image output")?;
+
+        // Use a separate subject for image outputs
+        let subject = format!("host.{}.image", self.host_id);
+        self.client
+            .publish(subject, payload.into())
+            .await
+            .context("Failed to publish image")?;
 
         Ok(())
     }
