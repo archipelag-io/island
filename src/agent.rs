@@ -10,9 +10,11 @@ use crate::wasm::{WasmConfig, WasmExecutor, WasmOutput};
 use anyhow::{Context, Result};
 use bollard::Docker;
 use futures_util::StreamExt;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use sysinfo::System;
 use tokio::select;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -120,15 +122,31 @@ impl Agent {
 
     /// Detect host capabilities
     fn detect_capabilities(&self) -> HostCapabilities {
-        // TODO: Actually detect GPU, CPU, RAM
-        // For now, use config or defaults
-        HostCapabilities {
-            gpu_model: Some("NVIDIA GeForce RTX".to_string()), // Placeholder
-            gpu_vram_mb: Some(8192),
+        // Detect RAM using sysinfo
+        let mut sys = System::new_all();
+        sys.refresh_memory();
+        let ram_mb = (sys.total_memory() / 1024 / 1024) as u32;
+
+        // Detect GPU using nvidia-smi
+        let (gpu_model, gpu_vram_mb) = detect_nvidia_gpu();
+
+        let capabilities = HostCapabilities {
+            gpu_model,
+            gpu_vram_mb,
             cpu_cores: num_cpus::get() as u32,
-            ram_mb: 16384, // Placeholder - should use sysinfo
-            region: None,
-        }
+            ram_mb,
+            region: self.config.host.region.clone(),
+        };
+
+        info!(
+            "Detected capabilities: {} CPU cores, {} MB RAM, GPU: {:?} ({:?} MB VRAM)",
+            capabilities.cpu_cores,
+            capabilities.ram_mb,
+            capabilities.gpu_model,
+            capabilities.gpu_vram_mb
+        );
+
+        capabilities
     }
 
     /// Check if host needs pairing and request a pairing code if so
@@ -482,4 +500,40 @@ async fn execute_container_job(
     }
 
     Ok(())
+}
+
+/// Detect NVIDIA GPU using nvidia-smi command
+fn detect_nvidia_gpu() -> (Option<String>, Option<u32>) {
+    // Try to run nvidia-smi to get GPU info
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let line = stdout.lines().next().unwrap_or("");
+
+            // Parse "NVIDIA GeForce RTX 3080, 10240"
+            let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+            if parts.len() >= 2 {
+                let gpu_model = Some(parts[0].to_string());
+                let gpu_vram_mb = parts[1].parse::<u32>().ok();
+                (gpu_model, gpu_vram_mb)
+            } else {
+                (None, None)
+            }
+        }
+        Ok(_) => {
+            debug!("nvidia-smi returned non-zero exit code");
+            (None, None)
+        }
+        Err(e) => {
+            debug!("nvidia-smi not available: {}", e);
+            (None, None)
+        }
+    }
 }

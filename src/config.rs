@@ -10,6 +10,10 @@ pub struct AgentConfig {
     /// Host ID (generated on first run if not set)
     pub host_id: Option<String>,
 
+    /// Host settings
+    #[serde(default)]
+    pub host: HostConfig,
+
     /// Coordinator settings
     pub coordinator: CoordinatorConfig,
 
@@ -19,6 +23,17 @@ pub struct AgentConfig {
 
     /// Workload settings
     pub workload: WorkloadConfig,
+}
+
+/// Host configuration
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct HostConfig {
+    /// Geographic region (e.g., "us-west-2", "eu-central-1")
+    pub region: Option<String>,
+
+    /// Human-readable name for this host
+    #[allow(dead_code)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -48,6 +63,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             host_id: None,
+            host: HostConfig::default(),
             coordinator: CoordinatorConfig {
                 nats_url: "nats://localhost:4222".to_string(),
             },

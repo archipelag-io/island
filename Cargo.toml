@@ -46,6 +46,7 @@ futures-util = "0.3"
 
 # System info
 num_cpus = "1.16"
+sysinfo = "0.32"
 
 # GPU detection (NVIDIA)
 # nvml-wrapper = "0.9"  # Uncomment when needed
