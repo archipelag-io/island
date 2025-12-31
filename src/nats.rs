@@ -27,6 +27,7 @@ pub mod subjects {
     }
 
     pub const REGISTRATION: &str = "coordinator.hosts.register";
+    pub const PAIRING: &str = "coordinator.hosts.pairing";
 }
 
 /// Host capabilities reported during registration
@@ -117,6 +118,26 @@ pub struct JobProgress {
     pub job_id: String,
     pub step: u32,
     pub total: u32,
+}
+
+/// Pairing request message
+#[derive(Debug, Serialize)]
+pub struct PairingRequest {
+    pub host_id: String,
+}
+
+/// Pairing response from coordinator
+#[derive(Debug, Deserialize)]
+pub struct PairingResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub expires_in_seconds: Option<u64>,
+    #[serde(default)]
+    pub pair_url: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// NATS connection wrapper with agent-specific functionality
@@ -284,6 +305,27 @@ impl NatsAgent {
     #[allow(dead_code)]
     pub fn host_id(&self) -> &str {
         &self.host_id
+    }
+
+    /// Request a pairing code from the coordinator
+    pub async fn request_pairing(&self) -> Result<PairingResponse> {
+        let msg = PairingRequest {
+            host_id: self.host_id.clone(),
+        };
+
+        let payload = serde_json::to_vec(&msg).context("Failed to serialize pairing request")?;
+
+        // Send request and wait for response (with 10 second timeout)
+        let response = self
+            .client
+            .request(subjects::PAIRING, payload.into())
+            .await
+            .context("Failed to send pairing request")?;
+
+        let pairing_response: PairingResponse =
+            serde_json::from_slice(&response.payload).context("Failed to parse pairing response")?;
+
+        Ok(pairing_response)
     }
 }
 

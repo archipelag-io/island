@@ -55,6 +55,9 @@ impl Agent {
         let capabilities = self.detect_capabilities();
         self.nats.register(capabilities).await?;
 
+        // Request pairing if needed
+        self.check_and_request_pairing().await;
+
         // Subscribe to job assignments
         let mut job_subscriber = self.nats.subscribe_jobs().await?;
 
@@ -125,6 +128,42 @@ impl Agent {
             cpu_cores: num_cpus::get() as u32,
             ram_mb: 16384, // Placeholder - should use sysinfo
             region: None,
+        }
+    }
+
+    /// Check if host needs pairing and request a pairing code if so
+    async fn check_and_request_pairing(&self) {
+        // TODO: Check if host is already paired (could store in local config)
+        // For now, always request pairing on startup
+
+        match self.nats.request_pairing().await {
+            Ok(response) => {
+                if response.success {
+                    if let Some(code) = response.code {
+                        info!("========================================");
+                        info!("       HOST PAIRING CODE: {}", code);
+                        info!("========================================");
+                        if let Some(url) = response.pair_url {
+                            info!("Visit {} to pair this host", url);
+                        }
+                        if let Some(expires) = response.expires_in_seconds {
+                            info!("Code expires in {} minutes", expires / 60);
+                        }
+                        info!("========================================");
+                    }
+                } else if let Some(error) = response.error {
+                    if error.contains("already paired") {
+                        info!("Host is already paired to an account");
+                    } else {
+                        warn!("Pairing request failed: {}", error);
+                    }
+                }
+            }
+            Err(e) => {
+                // Don't fail startup if pairing request fails
+                // This can happen if coordinator doesn't support pairing yet
+                debug!("Could not request pairing code: {}", e);
+            }
         }
     }
 
