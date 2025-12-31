@@ -59,6 +59,10 @@ pub enum ContainerOutput {
     Exit(i64),
     /// Container was killed due to timeout
     Timeout,
+    /// Container was killed due to OOM (out of memory)
+    OomKilled,
+    /// Container crashed with an error
+    Crashed { exit_code: i64, reason: String },
 }
 
 /// Run a container and stream its output through a channel.
@@ -73,14 +77,18 @@ pub async fn run_container_streaming(
     let container_name = format!("archipelag-job-{}", uuid::Uuid::new_v4());
     let timeout_duration = Duration::from_secs(config.timeout_seconds);
 
-    // Configure GPU access
-    let device_requests = config.gpu_devices.map(|devices| {
-        vec![DeviceRequest {
-            driver: Some("nvidia".to_string()),
-            device_ids: Some(devices),
-            capabilities: Some(vec![vec!["gpu".to_string()]]),
-            ..Default::default()
-        }]
+    // Configure GPU access (only if devices are actually specified)
+    let device_requests = config.gpu_devices.as_ref().and_then(|devices| {
+        if devices.is_empty() {
+            None
+        } else {
+            Some(vec![DeviceRequest {
+                driver: Some("nvidia".to_string()),
+                device_ids: Some(devices.clone()),
+                capabilities: Some(vec![vec!["gpu".to_string()]]),
+                ..Default::default()
+            }])
+        }
     });
 
     // Create container
@@ -202,8 +210,28 @@ pub async fn run_container_streaming(
 
     let exit_code = match run_result {
         Ok(code) => {
-            // Normal completion
-            let _ = output_tx.send(ContainerOutput::Exit(code)).await;
+            // Inspect container to get detailed exit info
+            let (final_code, oom_killed) = inspect_container_exit(docker, &container_id).await;
+            let code = final_code.unwrap_or(code);
+
+            if oom_killed {
+                warn!("Container {} was OOM killed", container_name);
+                let _ = output_tx.send(ContainerOutput::OomKilled).await;
+            } else if code != 0 {
+                // Non-zero exit - determine crash reason
+                let reason = interpret_exit_code(code);
+                warn!(
+                    "Container {} crashed with exit code {}: {}",
+                    container_name, code, reason
+                );
+                let _ = output_tx.send(ContainerOutput::Crashed {
+                    exit_code: code,
+                    reason,
+                }).await;
+            } else {
+                // Normal completion
+                let _ = output_tx.send(ContainerOutput::Exit(code)).await;
+            }
             code
         }
         Err(_) => {
@@ -278,9 +306,86 @@ where
         match output {
             ContainerOutput::Stdout(text) => on_output(text),
             ContainerOutput::Stderr(_) => {}
-            ContainerOutput::Exit(_) | ContainerOutput::Timeout => break,
+            ContainerOutput::Exit(_)
+            | ContainerOutput::Timeout
+            | ContainerOutput::OomKilled
+            | ContainerOutput::Crashed { .. } => break,
         }
     }
 
     runner.await?
+}
+
+/// Inspect a container to get detailed exit information
+async fn inspect_container_exit(docker: &Docker, container_id: &str) -> (Option<i64>, bool) {
+    match docker.inspect_container(container_id, None).await {
+        Ok(info) => {
+            let state = info.state.unwrap_or_default();
+            let exit_code = state.exit_code;
+            let oom_killed = state.oom_killed.unwrap_or(false);
+
+            debug!(
+                "Container exit inspection: code={:?}, oom_killed={}",
+                exit_code, oom_killed
+            );
+
+            (exit_code, oom_killed)
+        }
+        Err(e) => {
+            debug!("Failed to inspect container: {}", e);
+            (None, false)
+        }
+    }
+}
+
+/// Interpret container exit code to human-readable reason
+fn interpret_exit_code(code: i64) -> String {
+    match code {
+        1 => "General error (application failure)".to_string(),
+        2 => "Misuse of shell command or incorrect arguments".to_string(),
+        126 => "Command not executable (permission denied or not a binary)".to_string(),
+        127 => "Command not found".to_string(),
+        128 => "Invalid exit argument".to_string(),
+        // Signals: 128 + signal number
+        129 => "SIGHUP (hangup)".to_string(),
+        130 => "SIGINT (interrupt from keyboard, Ctrl+C)".to_string(),
+        131 => "SIGQUIT (quit from keyboard)".to_string(),
+        132 => "SIGILL (illegal instruction)".to_string(),
+        133 => "SIGTRAP (trace/breakpoint trap)".to_string(),
+        134 => "SIGABRT (abort signal)".to_string(),
+        135 => "SIGBUS (bus error)".to_string(),
+        136 => "SIGFPE (floating-point exception)".to_string(),
+        137 => "SIGKILL (killed, possibly by OOM killer or external signal)".to_string(),
+        139 => "SIGSEGV (segmentation fault)".to_string(),
+        141 => "SIGPIPE (broken pipe)".to_string(),
+        143 => "SIGTERM (terminated)".to_string(),
+        // Common application exit codes
+        255 => "Exit status out of range or SSH error".to_string(),
+        _ if code > 128 && code < 192 => {
+            format!("Killed by signal {} ({})", code - 128, signal_name(code - 128))
+        }
+        _ => format!("Unknown error (code {})", code),
+    }
+}
+
+/// Get signal name from number
+fn signal_name(signal: i64) -> &'static str {
+    match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        10 => "SIGUSR1",
+        11 => "SIGSEGV",
+        12 => "SIGUSR2",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "unknown",
+    }
 }

@@ -19,6 +19,11 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+/// Maximum backoff delay for reconnection attempts (30 seconds)
+const MAX_BACKOFF_SECS: u64 = 30;
+/// Initial backoff delay (1 second)
+const INITIAL_BACKOFF_SECS: u64 = 1;
+
 /// The main agent that coordinates all activity
 pub struct Agent {
     config: AgentConfig,
@@ -53,18 +58,21 @@ impl Agent {
 
     /// Run the agent
     pub async fn run(&self) -> Result<()> {
-        // Register with coordinator
+        // Detect capabilities once at startup
         let capabilities = self.detect_capabilities();
-        self.nats.register(capabilities).await?;
+
+        // Initial registration
+        self.register_and_setup(&capabilities).await?;
 
         // Request pairing if needed
         self.check_and_request_pairing().await;
 
-        // Subscribe to job assignments
-        let mut job_subscriber = self.nats.subscribe_jobs().await?;
-
         // Create channel for job completion notifications
         let (job_done_tx, mut job_done_rx) = mpsc::channel::<String>(32);
+
+        // Subscribe to job assignments
+        let mut job_subscriber = self.nats.subscribe_jobs().await?;
+        let mut consecutive_failures: u32 = 0;
 
         // Heartbeat interval
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(10));
@@ -78,18 +86,52 @@ impl Agent {
                     let active = self.active_jobs.load(Ordering::Relaxed);
                     if let Err(e) = self.nats.send_heartbeat(active).await {
                         warn!("Failed to send heartbeat: {}", e);
+                        consecutive_failures += 1;
+
+                        // If heartbeats are failing, subscription might be stale
+                        if consecutive_failures >= 3 {
+                            warn!("Multiple heartbeat failures, attempting to resubscribe...");
+                            match self.recover_subscription(&capabilities, &mut job_subscriber).await {
+                                Ok(()) => {
+                                    consecutive_failures = 0;
+                                    info!("Successfully recovered subscription");
+                                }
+                                Err(e) => {
+                                    error!("Failed to recover subscription: {}", e);
+                                }
+                            }
+                        }
+                    } else {
+                        consecutive_failures = 0;
                     }
                 }
 
-                // Job assignment received
-                Some(msg) = job_subscriber.next() => {
-                    match nats::parse_job_assignment(&msg) {
-                        Ok(job) => {
-                            info!("Received job assignment: {}", job.job_id);
-                            self.spawn_job(job, job_done_tx.clone());
+                // Job assignment received (or subscription closed)
+                msg = job_subscriber.next() => {
+                    match msg {
+                        Some(msg) => {
+                            match nats::parse_job_assignment(&msg) {
+                                Ok(job) => {
+                                    info!("Received job assignment: {}", job.job_id);
+                                    self.spawn_job(job, job_done_tx.clone());
+                                }
+                                Err(e) => {
+                                    error!("Failed to parse job assignment: {}", e);
+                                }
+                            }
                         }
-                        Err(e) => {
-                            error!("Failed to parse job assignment: {}", e);
+                        None => {
+                            // Subscription closed - need to recover
+                            warn!("Job subscription closed, attempting to recover...");
+                            match self.recover_subscription(&capabilities, &mut job_subscriber).await {
+                                Ok(()) => {
+                                    info!("Successfully recovered subscription");
+                                }
+                                Err(e) => {
+                                    error!("Failed to recover subscription after retries: {}", e);
+                                    // Continue loop - will try again on next iteration
+                                }
+                            }
                         }
                     }
                 }
@@ -118,6 +160,60 @@ impl Agent {
 
         info!("Agent shutdown complete");
         Ok(())
+    }
+
+    /// Register with coordinator
+    async fn register_and_setup(&self, capabilities: &HostCapabilities) -> Result<()> {
+        self.nats.register(capabilities.clone()).await?;
+        Ok(())
+    }
+
+    /// Recover subscription with exponential backoff
+    async fn recover_subscription(
+        &self,
+        capabilities: &HostCapabilities,
+        subscriber: &mut async_nats::Subscriber,
+    ) -> Result<()> {
+        let mut backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
+        let max_backoff = Duration::from_secs(MAX_BACKOFF_SECS);
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 10;
+
+        while attempts < MAX_ATTEMPTS {
+            attempts += 1;
+            info!(
+                "Attempting to recover subscription (attempt {}/{}, backoff {:?})",
+                attempts, MAX_ATTEMPTS, backoff
+            );
+
+            // Wait with backoff
+            tokio::time::sleep(backoff).await;
+
+            // Try to re-register first (in case coordinator lost our state)
+            if let Err(e) = self.nats.register(capabilities.clone()).await {
+                warn!("Failed to re-register: {}", e);
+                backoff = std::cmp::min(backoff * 2, max_backoff);
+                continue;
+            }
+
+            // Try to resubscribe
+            match self.nats.subscribe_jobs().await {
+                Ok(new_subscriber) => {
+                    *subscriber = new_subscriber;
+                    info!("Subscription recovered successfully after {} attempts", attempts);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Failed to resubscribe: {}", e);
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "Failed to recover subscription after {} attempts",
+            MAX_ATTEMPTS
+        )
     }
 
     /// Detect host capabilities
@@ -410,7 +506,7 @@ async fn execute_container_job(
     let mut buffer = String::new();
     let mut token_count: u32 = 0;
     let mut streaming_started = false;
-    let mut timed_out = false;
+    let mut failure_reason: Option<String> = None;
 
     // Process container output and forward to NATS
     while let Some(output) = output_rx.recv().await {
@@ -472,7 +568,20 @@ async fn execute_container_job(
             }
             ContainerOutput::Timeout => {
                 warn!("Container timed out after {}s", DEFAULT_CONTAINER_TIMEOUT_SECS);
-                timed_out = true;
+                failure_reason = Some(format!(
+                    "Timeout: job exceeded {}s limit",
+                    DEFAULT_CONTAINER_TIMEOUT_SECS
+                ));
+                break;
+            }
+            ContainerOutput::OomKilled => {
+                error!("Container was killed due to out-of-memory");
+                failure_reason = Some("Out of memory: container exceeded memory limit".to_string());
+                break;
+            }
+            ContainerOutput::Crashed { exit_code, reason } => {
+                error!("Container crashed: {} (exit code {})", reason, exit_code);
+                failure_reason = Some(format!("Container crash: {}", reason));
                 break;
             }
         }
@@ -482,21 +591,19 @@ async fn execute_container_job(
     let exit_code = container_handle.await??;
 
     // Send final status
-    if timed_out {
-        nats.publish_status(
-            job_id,
-            "failed",
-            Some(format!("Timeout: job exceeded {}s limit", DEFAULT_CONTAINER_TIMEOUT_SECS)),
-        )
-        .await?;
-        warn!("Job {} failed: timeout", job_id);
+    if let Some(reason) = failure_reason {
+        nats.publish_status(job_id, "failed", Some(reason.clone()))
+            .await?;
+        warn!("Job {} failed: {}", job_id, reason);
     } else if exit_code == 0 {
         nats.publish_output(job_id, seq + 1, "", true).await?;
         nats.publish_status(job_id, "succeeded", None).await?;
         info!("Job {} succeeded, generated {} tokens", job_id, token_count);
     } else {
+        // This shouldn't happen with new error handling, but keep as fallback
         nats.publish_status(job_id, "failed", Some(format!("Exit code: {}", exit_code)))
             .await?;
+        warn!("Job {} failed: exit code {}", job_id, exit_code);
     }
 
     Ok(())
