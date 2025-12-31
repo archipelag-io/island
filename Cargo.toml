@@ -44,6 +44,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Futures utilities
 futures-util = "0.3"
 
+# Concurrent data structures
+dashmap = "6"
+
+# Random number generation
+rand = "0.8"
+
 # System info
 num_cpus = "1.16"
 sysinfo = "0.32"

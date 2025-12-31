@@ -26,6 +26,14 @@ pub mod subjects {
         format!("host.{}.heartbeat", host_id)
     }
 
+    pub fn cancel(host_id: &str) -> String {
+        format!("host.{}.cancel", host_id)
+    }
+
+    pub fn lease(host_id: &str) -> String {
+        format!("host.{}.lease", host_id)
+    }
+
     pub const REGISTRATION: &str = "coordinator.hosts.register";
     pub const PAIRING: &str = "coordinator.hosts.pairing";
 }
@@ -120,6 +128,19 @@ pub struct JobProgress {
     pub total: u32,
 }
 
+/// Cancel job request from coordinator
+#[derive(Debug, Deserialize)]
+pub struct CancelJob {
+    pub job_id: String,
+}
+
+/// Lease renewal request to coordinator
+#[derive(Debug, Serialize)]
+pub struct LeaseRenewal {
+    pub job_id: String,
+    pub extend_seconds: u64,
+}
+
 /// Pairing request message
 #[derive(Debug, Serialize)]
 pub struct PairingRequest {
@@ -196,6 +217,19 @@ impl NatsAgent {
             .context("Failed to subscribe to jobs")?;
 
         info!("Subscribed to job assignments on {}", subject);
+        Ok(subscriber)
+    }
+
+    /// Subscribe to cancel requests for this host
+    pub async fn subscribe_cancel(&self) -> Result<Subscriber> {
+        let subject = subjects::cancel(&self.host_id);
+        let subscriber = self
+            .client
+            .subscribe(subject.clone())
+            .await
+            .context("Failed to subscribe to cancel")?;
+
+        info!("Subscribed to cancel requests on {}", subject);
         Ok(subscriber)
     }
 
@@ -305,6 +339,24 @@ impl NatsAgent {
     #[allow(dead_code)]
     pub fn host_id(&self) -> &str {
         &self.host_id
+    }
+
+    /// Renew lease for a running job
+    pub async fn renew_lease(&self, job_id: &str, extend_seconds: u64) -> Result<()> {
+        let msg = LeaseRenewal {
+            job_id: job_id.to_string(),
+            extend_seconds,
+        };
+
+        let payload = serde_json::to_vec(&msg).context("Failed to serialize lease renewal")?;
+
+        self.client
+            .publish(subjects::lease(&self.host_id), payload.into())
+            .await
+            .context("Failed to publish lease renewal")?;
+
+        debug!("Renewed lease for job {} by {} seconds", job_id, extend_seconds);
+        Ok(())
     }
 
     /// Request a pairing code from the coordinator

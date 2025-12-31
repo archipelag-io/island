@@ -5,24 +5,29 @@
 use crate::config::AgentConfig;
 use crate::docker::{self, ContainerConfig, ContainerOutput};
 use crate::messages::WorkloadOutput;
-use crate::nats::{self, AssignJob, HostCapabilities, NatsAgent};
+use crate::nats::{self, AssignJob, CancelJob, HostCapabilities, NatsAgent};
 use crate::wasm::{WasmConfig, WasmExecutor, WasmOutput};
 use anyhow::{Context, Result};
 use bollard::Docker;
+use dashmap::DashMap;
 use futures_util::StreamExt;
+use rand::Rng;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::select;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 /// Maximum backoff delay for reconnection attempts (30 seconds)
 const MAX_BACKOFF_SECS: u64 = 30;
 /// Initial backoff delay (1 second)
 const INITIAL_BACKOFF_SECS: u64 = 1;
+/// Jitter range for backoff (±25%)
+const JITTER_MIN: f64 = 0.75;
+const JITTER_MAX: f64 = 1.25;
 
 /// The main agent that coordinates all activity
 pub struct Agent {
@@ -31,6 +36,8 @@ pub struct Agent {
     nats: NatsAgent,
     active_jobs: Arc<AtomicU32>,
     shutdown: Arc<AtomicBool>,
+    /// Map of job_id -> cancel sender for running jobs
+    job_cancellers: Arc<DashMap<String, watch::Sender<bool>>>,
 }
 
 impl Agent {
@@ -53,6 +60,7 @@ impl Agent {
             nats,
             active_jobs: Arc::new(AtomicU32::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            job_cancellers: Arc::new(DashMap::new()),
         })
     }
 
@@ -72,6 +80,10 @@ impl Agent {
 
         // Subscribe to job assignments
         let mut job_subscriber = self.nats.subscribe_jobs().await?;
+
+        // Subscribe to cancel requests
+        let mut cancel_subscriber = self.nats.subscribe_cancel().await?;
+
         let mut consecutive_failures: u32 = 0;
 
         // Heartbeat interval
@@ -139,7 +151,25 @@ impl Agent {
                 // Job completed
                 Some(job_id) = job_done_rx.recv() => {
                     self.active_jobs.fetch_sub(1, Ordering::Relaxed);
+                    // Clean up canceller
+                    self.job_cancellers.remove(&job_id);
                     info!("Job {} completed", job_id);
+                }
+
+                // Cancel request received
+                msg = cancel_subscriber.next() => {
+                    if let Some(msg) = msg {
+                        if let Ok(cancel) = serde_json::from_slice::<CancelJob>(&msg.payload) {
+                            info!("Received cancel request for job {}", cancel.job_id);
+                            // Signal cancellation to the running job
+                            if let Some(sender) = self.job_cancellers.get(&cancel.job_id) {
+                                let _ = sender.send(true);
+                                info!("Signaled cancellation for job {}", cancel.job_id);
+                            } else {
+                                debug!("Job {} not found in active jobs (may have already completed)", cancel.job_id);
+                            }
+                        }
+                    }
                 }
 
                 // Shutdown signal
@@ -181,13 +211,18 @@ impl Agent {
 
         while attempts < MAX_ATTEMPTS {
             attempts += 1;
+
+            // Apply jitter to prevent thundering herd
+            let jitter = rand::thread_rng().gen_range(JITTER_MIN..JITTER_MAX);
+            let backoff_with_jitter = backoff.mul_f64(jitter);
+
             info!(
                 "Attempting to recover subscription (attempt {}/{}, backoff {:?})",
-                attempts, MAX_ATTEMPTS, backoff
+                attempts, MAX_ATTEMPTS, backoff_with_jitter
             );
 
-            // Wait with backoff
-            tokio::time::sleep(backoff).await;
+            // Wait with jittered backoff
+            tokio::time::sleep(backoff_with_jitter).await;
 
             // Try to re-register first (in case coordinator lost our state)
             if let Err(e) = self.nats.register(capabilities.clone()).await {
@@ -285,6 +320,10 @@ impl Agent {
     fn spawn_job(&self, job: AssignJob, done_tx: mpsc::Sender<String>) {
         self.active_jobs.fetch_add(1, Ordering::Relaxed);
 
+        // Create cancel channel for this job
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        self.job_cancellers.insert(job.job_id.clone(), cancel_tx);
+
         let docker = self.docker.clone();
         let nats = self.nats.clone();
         let config = self.config.clone();
@@ -293,7 +332,7 @@ impl Agent {
         tokio::spawn(async move {
             let job_id = job.job_id.clone();
 
-            if let Err(e) = execute_job(&docker, &nats, &config, job, shutdown).await {
+            if let Err(e) = execute_job(&docker, &nats, &config, job, shutdown, cancel_rx).await {
                 error!("Job {} failed: {}", job_id, e);
                 let _ = nats
                     .publish_status(&job_id, "failed", Some(e.to_string()))
@@ -312,21 +351,28 @@ async fn execute_job(
     config: &AgentConfig,
     job: AssignJob,
     _shutdown: Arc<AtomicBool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let job_id = &job.job_id;
+
+    // Check if already cancelled before starting
+    if *cancel_rx.borrow() {
+        nats.publish_status(job_id, "cancelled", None).await?;
+        return Ok(());
+    }
 
     // Notify started
     nats.publish_status(job_id, "started", None).await?;
 
     // Route based on runtime type
     match job.runtime_type.as_str() {
-        "wasm" => execute_wasm_job(nats, &job).await,
-        "container" | _ => execute_container_job(docker, nats, config, &job).await,
+        "wasm" => execute_wasm_job(nats, &job, cancel_rx).await,
+        "container" | _ => execute_container_job(docker, nats, config, &job, cancel_rx).await,
     }
 }
 
 /// Execute a WASM workload
-async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob) -> Result<()> {
+async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob, mut cancel_rx: watch::Receiver<bool>) -> Result<()> {
     let job_id = &job.job_id;
 
     let wasm_url = job
@@ -361,14 +407,44 @@ async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob) -> Result<()> {
         executor.run(wasm_config, output_tx).await
     });
 
-    // Process WASM output
-    let (exit_code, token_count, timed_out) = process_wasm_output(nats, job_id, &mut output_rx).await?;
+    // Lease renewal interval (every 30 seconds)
+    let mut lease_interval = tokio::time::interval(Duration::from_secs(LEASE_RENEWAL_INTERVAL_SECS));
+    lease_interval.tick().await; // Skip immediate first tick
 
-    // Wait for WASM to fully finish
-    let _exit_code = wasm_handle.await??;
+    // Process WASM output with cancellation and lease renewal support
+    let mut cancelled = false;
+    let (exit_code, token_count, timed_out) = loop {
+        select! {
+            result = process_wasm_output(nats, job_id, &mut output_rx) => {
+                break result?;
+            }
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    info!("WASM job {} cancelled", job_id);
+                    cancelled = true;
+                    wasm_handle.abort();
+                    break (0, 0, false);
+                }
+            }
+            // Lease renewal tick
+            _ = lease_interval.tick() => {
+                debug!("Renewing lease for WASM job {}", job_id);
+                if let Err(e) = nats.renew_lease(job_id, LEASE_EXTENSION_SECS).await {
+                    warn!("Failed to renew lease for WASM job {}: {}", job_id, e);
+                }
+            }
+        }
+    };
+
+    // Wait for WASM to fully finish (if not aborted)
+    if !cancelled {
+        let _ = wasm_handle.await;
+    }
 
     // Send final status
-    if timed_out {
+    if cancelled {
+        nats.publish_status(job_id, "cancelled", None).await?;
+    } else if timed_out {
         nats.publish_status(
             job_id,
             "failed",
@@ -465,12 +541,19 @@ async fn process_wasm_output(
 /// Default timeout for container workloads (5 minutes)
 const DEFAULT_CONTAINER_TIMEOUT_SECS: u64 = 300;
 
+/// Lease renewal interval (30 seconds)
+const LEASE_RENEWAL_INTERVAL_SECS: u64 = 30;
+
+/// Lease extension duration (60 seconds)
+const LEASE_EXTENSION_SECS: u64 = 60;
+
 /// Execute a container workload
 async fn execute_container_job(
     docker: &Docker,
     nats: &NatsAgent,
     config: &AgentConfig,
     job: &AssignJob,
+    mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let job_id = &job.job_id;
 
@@ -507,103 +590,128 @@ async fn execute_container_job(
     let mut token_count: u32 = 0;
     let mut streaming_started = false;
     let mut failure_reason: Option<String> = None;
+    let mut cancelled = false;
 
-    // Process container output and forward to NATS
-    while let Some(output) = output_rx.recv().await {
-        match output {
-            ContainerOutput::Stdout(chunk) => {
-                buffer.push_str(&chunk);
+    // Lease renewal interval (every 30 seconds)
+    let mut lease_interval = tokio::time::interval(Duration::from_secs(LEASE_RENEWAL_INTERVAL_SECS));
+    lease_interval.tick().await; // Skip immediate first tick
 
-                // Process complete JSON lines
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+    // Process container output and forward to NATS, with cancellation and lease renewal
+    loop {
+        select! {
+            output = output_rx.recv() => {
+                let Some(output) = output else { break };
+                match output {
+                    ContainerOutput::Stdout(chunk) => {
+                        buffer.push_str(&chunk);
 
-                    if line.trim().is_empty() {
-                        continue;
-                    }
+                        // Process complete JSON lines
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
 
-                    // Parse workload output
-                    if let Ok(workload_output) = serde_json::from_str::<WorkloadOutput>(&line) {
-                        match &workload_output {
-                            WorkloadOutput::Status { message } => {
-                                debug!("Workload status: {}", message);
-                                if message == "ready" && !streaming_started {
-                                    nats.publish_status(job_id, "streaming", None).await?;
-                                    streaming_started = true;
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+
+                            // Parse workload output
+                            if let Ok(workload_output) = serde_json::from_str::<WorkloadOutput>(&line) {
+                                match &workload_output {
+                                    WorkloadOutput::Status { message } => {
+                                        debug!("Workload status: {}", message);
+                                        if message == "ready" && !streaming_started {
+                                            nats.publish_status(job_id, "streaming", None).await?;
+                                            streaming_started = true;
+                                        }
+                                    }
+                                    WorkloadOutput::Token { content } => {
+                                        token_count += 1;
+                                        seq += 1;
+                                        nats.publish_output(job_id, seq, content, false).await?;
+                                    }
+                                    WorkloadOutput::Progress { step, total } => {
+                                        debug!("Workload progress: {}/{}", step, total);
+                                        nats.publish_progress(job_id, *step, *total).await?;
+                                    }
+                                    WorkloadOutput::Image { data, format, width, height } => {
+                                        info!("Received image: {}x{} {}", width, height, format);
+                                        nats.publish_image(job_id, data, format, *width, *height, None).await?;
+                                    }
+                                    WorkloadOutput::Done { usage, seed } => {
+                                        debug!("Workload done: usage={:?}, seed={:?}", usage, seed);
+                                    }
+                                    WorkloadOutput::Error { message } => {
+                                        error!("Workload error: {}", message);
+                                    }
                                 }
-                            }
-                            WorkloadOutput::Token { content } => {
-                                token_count += 1;
-                                seq += 1;
-                                // Publish token to NATS
-                                nats.publish_output(job_id, seq, content, false).await?;
-                            }
-                            WorkloadOutput::Progress { step, total } => {
-                                debug!("Workload progress: {}/{}", step, total);
-                                nats.publish_progress(job_id, *step, *total).await?;
-                            }
-                            WorkloadOutput::Image { data, format, width, height } => {
-                                info!("Received image: {}x{} {}", width, height, format);
-                                nats.publish_image(job_id, data, format, *width, *height, None).await?;
-                            }
-                            WorkloadOutput::Done { usage, seed } => {
-                                debug!("Workload done: usage={:?}, seed={:?}", usage, seed);
-                            }
-                            WorkloadOutput::Error { message } => {
-                                error!("Workload error: {}", message);
+                            } else {
+                                debug!("Unparsed output line: {}", line);
                             }
                         }
-                    } else {
-                        debug!("Unparsed output line: {}", line);
+                    }
+                    ContainerOutput::Stderr(text) => {
+                        debug!("Container stderr: {}", text);
+                    }
+                    ContainerOutput::Exit(code) => {
+                        debug!("Container exited with code: {}", code);
+                        break;
+                    }
+                    ContainerOutput::Timeout => {
+                        warn!("Container timed out after {}s", DEFAULT_CONTAINER_TIMEOUT_SECS);
+                        failure_reason = Some(format!(
+                            "Timeout: job exceeded {}s limit",
+                            DEFAULT_CONTAINER_TIMEOUT_SECS
+                        ));
+                        break;
+                    }
+                    ContainerOutput::OomKilled => {
+                        error!("Container was killed due to out-of-memory");
+                        failure_reason = Some("Out of memory: container exceeded memory limit".to_string());
+                        break;
+                    }
+                    ContainerOutput::Crashed { exit_code, reason } => {
+                        error!("Container crashed: {} (exit code {})", reason, exit_code);
+                        failure_reason = Some(format!("Container crash: {}", reason));
+                        break;
                     }
                 }
             }
-            ContainerOutput::Stderr(text) => {
-                debug!("Container stderr: {}", text);
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    info!("Container job {} cancelled", job_id);
+                    cancelled = true;
+                    container_handle.abort();
+                    break;
+                }
             }
-            ContainerOutput::Exit(code) => {
-                debug!("Container exited with code: {}", code);
-                break;
-            }
-            ContainerOutput::Timeout => {
-                warn!("Container timed out after {}s", DEFAULT_CONTAINER_TIMEOUT_SECS);
-                failure_reason = Some(format!(
-                    "Timeout: job exceeded {}s limit",
-                    DEFAULT_CONTAINER_TIMEOUT_SECS
-                ));
-                break;
-            }
-            ContainerOutput::OomKilled => {
-                error!("Container was killed due to out-of-memory");
-                failure_reason = Some("Out of memory: container exceeded memory limit".to_string());
-                break;
-            }
-            ContainerOutput::Crashed { exit_code, reason } => {
-                error!("Container crashed: {} (exit code {})", reason, exit_code);
-                failure_reason = Some(format!("Container crash: {}", reason));
-                break;
+            // Lease renewal tick
+            _ = lease_interval.tick() => {
+                debug!("Renewing lease for job {}", job_id);
+                if let Err(e) = nats.renew_lease(job_id, LEASE_EXTENSION_SECS).await {
+                    warn!("Failed to renew lease for job {}: {}", job_id, e);
+                    // Don't fail the job just because lease renewal failed
+                    // Coordinator will handle lease expiry if needed
+                }
             }
         }
     }
 
-    // Wait for container to fully finish
-    let exit_code = container_handle.await??;
+    // Wait for container to fully finish (if not aborted)
+    if !cancelled {
+        let _ = container_handle.await;
+    }
 
     // Send final status
-    if let Some(reason) = failure_reason {
+    if cancelled {
+        nats.publish_status(job_id, "cancelled", None).await?;
+    } else if let Some(reason) = failure_reason {
         nats.publish_status(job_id, "failed", Some(reason.clone()))
             .await?;
         warn!("Job {} failed: {}", job_id, reason);
-    } else if exit_code == 0 {
+    } else {
         nats.publish_output(job_id, seq + 1, "", true).await?;
         nats.publish_status(job_id, "succeeded", None).await?;
         info!("Job {} succeeded, generated {} tokens", job_id, token_count);
-    } else {
-        // This shouldn't happen with new error handling, but keep as fallback
-        nats.publish_status(job_id, "failed", Some(format!("Exit code: {}", exit_code)))
-            .await?;
-        warn!("Job {} failed: exit code {}", job_id, exit_code);
     }
 
     Ok(())
