@@ -393,6 +393,7 @@ async fn execute_wasm_job(nats: &NatsAgent, job: &AssignJob, mut cancel_rx: watc
         module_path: wasm_path,
         input: input_json,
         timeout_seconds: DEFAULT_WASM_TIMEOUT_SECS,
+        expected_hash: job.wasm_hash.clone(),
         ..Default::default()
     };
 
