@@ -20,12 +20,33 @@ pub async fn run_test_job(docker: &Docker, config: &AgentConfig, prompt: &str) -
 
     let input_json = serde_json::to_string(&input).context("Failed to serialize input")?;
 
-    // Configure container
+    // Configure container with resource limits from config
+    let limits = &config.workload.resource_limits;
+    let memory_bytes = Some((limits.memory_mb * 1024 * 1024) as i64);
+
+    let tmpfs_mounts = if limits.read_only_rootfs {
+        let mut mounts = std::collections::HashMap::new();
+        mounts.insert(
+            "/tmp".to_string(),
+            format!("rw,noexec,nosuid,size={}m", limits.tmpfs_size_mb),
+        );
+        Some(mounts)
+    } else {
+        None
+    };
+
+    let cpu_quota = limits.cpu_percent.map(|percent| (percent * 1000) as i64);
+
     let container_config = ContainerConfig {
         image: config.workload.llm_chat_image.clone(),
         input: input_json,
         gpu_devices: config.workload.gpu_devices.clone(),
         timeout_seconds: 300, // 5 minute timeout for test jobs
+        expected_digest: None, // No digest verification for test jobs
+        memory_bytes,
+        read_only_rootfs: limits.read_only_rootfs,
+        tmpfs_mounts,
+        cpu_quota,
     };
 
     info!("Starting container: {}", container_config.image);

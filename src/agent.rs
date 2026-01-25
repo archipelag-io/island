@@ -568,11 +568,35 @@ async fn execute_container_job(
     // Prepare container config
     let input_json = serde_json::to_string(&job.input).context("Failed to serialize job input")?;
 
+    // Build resource limits from config
+    let limits = &config.workload.resource_limits;
+    let memory_bytes = Some((limits.memory_mb * 1024 * 1024) as i64);
+
+    // Set up tmpfs mounts if read-only rootfs is enabled
+    let tmpfs_mounts = if limits.read_only_rootfs {
+        let mut mounts = std::collections::HashMap::new();
+        mounts.insert(
+            "/tmp".to_string(),
+            format!("rw,noexec,nosuid,size={}m", limits.tmpfs_size_mb),
+        );
+        Some(mounts)
+    } else {
+        None
+    };
+
+    // Convert CPU percentage to quota (100% = 100000 microseconds per period)
+    let cpu_quota = limits.cpu_percent.map(|percent| (percent * 1000) as i64);
+
     let container_config = ContainerConfig {
         image,
         input: input_json,
         gpu_devices: config.workload.gpu_devices.clone(),
         timeout_seconds: DEFAULT_CONTAINER_TIMEOUT_SECS,
+        expected_digest: job.image_digest.clone(),
+        memory_bytes,
+        read_only_rootfs: limits.read_only_rootfs,
+        tmpfs_mounts,
+        cpu_quota,
     };
 
     // Create channel for container output

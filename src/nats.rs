@@ -79,9 +79,12 @@ pub struct AssignJob {
     pub runtime_type: String,
     /// For container workloads
     pub container_image: Option<String>,
+    /// Expected digest of the container image (sha256:...)
+    /// If provided, the agent will verify the image digest before execution
+    pub image_digest: Option<String>,
     /// For WASM workloads
     pub wasm_url: Option<String>,
-    #[allow(dead_code)]
+    /// Expected hash of the WASM module
     pub wasm_hash: Option<String>,
 }
 

@@ -20,3 +20,21 @@ llm_chat_image = "llm-chat:latest"
 # GPU devices to use (NVIDIA device IDs)
 # Use ["0"] for single GPU, ["0", "1"] for multi-GPU
 gpu_devices = ["0"]
+
+# Resource limits for container workloads
+[workload.resource_limits]
+# Memory limit in MB (default: 8192 = 8GB)
+memory_mb = 8192
+
+# Enable read-only root filesystem for security (default: true)
+# When enabled, containers cannot write to their filesystem
+read_only_rootfs = true
+
+# Size of tmpfs mount at /tmp in MB (default: 256)
+# Only used when read_only_rootfs is true
+# This provides a writable temp directory without disk access
+tmpfs_size_mb = 256
+
+# CPU quota as percentage (e.g., 200 = 2 cores, 50 = half core)
+# Uncomment to limit CPU usage (default: no limit)
+# cpu_percent = 100

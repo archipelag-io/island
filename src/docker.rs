@@ -11,6 +11,7 @@ use bollard::container::{
 use bollard::models::{DeviceRequest, HostConfig};
 use bollard::Docker;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -31,6 +32,62 @@ pub async fn connect() -> Result<Docker> {
     Ok(docker)
 }
 
+/// Verify that an image's digest matches the expected digest.
+///
+/// The digest should be in the format "sha256:<hash>" or just "<hash>".
+/// Returns Ok(()) if verification passes, Err if it fails or can't be verified.
+pub async fn verify_image_digest(
+    docker: &Docker,
+    image: &str,
+    expected_digest: &str,
+) -> Result<()> {
+    // Normalize expected digest (ensure it has sha256: prefix)
+    let expected = if expected_digest.starts_with("sha256:") {
+        expected_digest.to_string()
+    } else {
+        format!("sha256:{}", expected_digest)
+    };
+
+    // Inspect the image to get its digest
+    let inspect = docker
+        .inspect_image(image)
+        .await
+        .context("Failed to inspect image for digest verification")?;
+
+    // Get the image ID (which is the digest)
+    let image_id = inspect.id.unwrap_or_default();
+
+    // Image ID format is "sha256:<hash>"
+    if image_id == expected {
+        info!("Image digest verified: {}", &expected[..20.min(expected.len())]);
+        return Ok(());
+    }
+
+    // Also check RepoDigests for images pulled with a tag
+    if let Some(repo_digests) = inspect.repo_digests {
+        for repo_digest in &repo_digests {
+            // RepoDigests are in format "repo@sha256:<hash>"
+            if let Some(digest_part) = repo_digest.split('@').nth(1) {
+                if digest_part == expected {
+                    info!("Image digest verified via repo digest: {}", &expected[..20.min(expected.len())]);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Digest mismatch - this is a security violation
+    warn!(
+        "Image digest mismatch! Expected: {}, Got ID: {}",
+        expected, image_id
+    );
+    anyhow::bail!(
+        "Image digest verification failed: expected {}, got {}",
+        expected,
+        image_id
+    )
+}
+
 /// Container configuration for a workload
 pub struct ContainerConfig {
     pub image: String,
@@ -38,6 +95,18 @@ pub struct ContainerConfig {
     pub gpu_devices: Option<Vec<String>>,
     /// Timeout in seconds (default: 300 = 5 minutes)
     pub timeout_seconds: u64,
+    /// Expected image digest (sha256:...) for verification
+    /// If provided, the agent will verify the pulled image matches this digest
+    pub expected_digest: Option<String>,
+    /// Memory limit in bytes (default: 8GB)
+    pub memory_bytes: Option<i64>,
+    /// Enable read-only root filesystem (default: true)
+    pub read_only_rootfs: bool,
+    /// Tmpfs mounts (e.g., {"/tmp": "rw,noexec,nosuid,size=256m"})
+    pub tmpfs_mounts: Option<HashMap<String, String>>,
+    /// CPU quota in microseconds per 100ms period (100000 = 1 CPU)
+    /// None = no limit
+    pub cpu_quota: Option<i64>,
 }
 
 impl Default for ContainerConfig {
@@ -47,6 +116,11 @@ impl Default for ContainerConfig {
             input: String::new(),
             gpu_devices: None,
             timeout_seconds: 300, // 5 minutes default
+            expected_digest: None,
+            memory_bytes: Some(8 * 1024 * 1024 * 1024), // 8GB default
+            read_only_rootfs: true,
+            tmpfs_mounts: None,
+            cpu_quota: None,
         }
     }
 }
@@ -77,6 +151,15 @@ pub async fn run_container_streaming(
     let container_name = format!("archipelag-job-{}", uuid::Uuid::new_v4());
     let timeout_duration = Duration::from_secs(config.timeout_seconds);
 
+    // Verify image digest if one was specified
+    if let Some(ref expected_digest) = config.expected_digest {
+        verify_image_digest(docker, &config.image, expected_digest)
+            .await
+            .context("Image digest verification failed - refusing to execute")?;
+    } else {
+        debug!("No expected digest provided, skipping verification for image: {}", config.image);
+    }
+
     // Configure GPU access (only if devices are actually specified)
     let device_requests = config.gpu_devices.as_ref().and_then(|devices| {
         if devices.is_empty() {
@@ -91,17 +174,28 @@ pub async fn run_container_streaming(
         }
     });
 
-    // Create container
+    // Create container with resource limits
     let host_config = HostConfig {
         device_requests,
+        // Memory limit
+        memory: config.memory_bytes,
         // Read-only root filesystem for security
-        // read_only_rootfs: Some(true),
-        // Memory limit (8GB)
-        memory: Some(8 * 1024 * 1024 * 1024),
+        readonly_rootfs: Some(config.read_only_rootfs),
+        // Tmpfs mounts (e.g., /tmp for writable temp space when rootfs is read-only)
+        tmpfs: config.tmpfs_mounts.clone(),
+        // CPU quota (microseconds per 100ms period)
+        cpu_quota: config.cpu_quota,
         // No network access for workloads (security)
         // network_mode: Some("none".to_string()),
         ..Default::default()
     };
+
+    if config.read_only_rootfs {
+        debug!(
+            "Container will use read-only rootfs{}",
+            if config.tmpfs_mounts.is_some() { " with tmpfs mounts" } else { "" }
+        );
+    }
 
     let container_config = Config {
         image: Some(config.image.clone()),
