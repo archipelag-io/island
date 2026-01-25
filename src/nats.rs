@@ -56,7 +56,7 @@ pub struct RegisterHost {
     pub version: String,
 }
 
-/// Heartbeat message
+/// Heartbeat message (basic)
 #[derive(Debug, Serialize)]
 pub struct Heartbeat {
     pub host_id: String,
@@ -65,12 +65,82 @@ pub struct Heartbeat {
     pub timestamp: i64,
 }
 
+/// Enhanced heartbeat message with detailed metrics
+#[derive(Debug, Serialize)]
+pub struct EnhancedHeartbeat {
+    pub host_id: String,
+    pub status: String,
+    pub active_jobs: u32,
+    pub timestamp: i64,
+    pub agent_version: String,
+    /// System-wide metrics
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemMetricsSnapshot>,
+    /// GPU metrics (one per GPU)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<Vec<GpuMetricsSnapshot>>,
+    /// Metrics for currently active jobs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_job_metrics: Option<Vec<ActiveJobMetrics>>,
+    /// Cache statistics for cold-start optimization
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheMetricsSnapshot>,
+}
+
+/// Cache metrics snapshot for heartbeat
+#[derive(Debug, Serialize)]
+pub struct CacheMetricsSnapshot {
+    /// Number of cached container images
+    pub cached_image_count: usize,
+    /// Total size of cached images in MB
+    pub cached_size_mb: u64,
+    /// Number of warm workloads (recently used)
+    pub warm_workload_count: usize,
+    /// List of warm workload IDs
+    pub warm_workload_ids: Vec<String>,
+}
+
+/// System metrics snapshot for heartbeat
+#[derive(Debug, Serialize)]
+pub struct SystemMetricsSnapshot {
+    pub cpu_percent: f32,
+    pub memory_used_mb: u64,
+    pub memory_total_mb: u64,
+    pub disk_used_gb: u64,
+    pub disk_total_gb: u64,
+}
+
+/// GPU metrics snapshot for heartbeat
+#[derive(Debug, Serialize)]
+pub struct GpuMetricsSnapshot {
+    pub index: u32,
+    pub utilization_percent: u32,
+    pub memory_used_mb: u64,
+    pub memory_total_mb: u64,
+    pub temperature_c: u32,
+    pub power_draw_w: f32,
+}
+
+/// Active job metrics for heartbeat
+#[derive(Debug, Serialize)]
+pub struct ActiveJobMetrics {
+    pub job_id: String,
+    pub job_type: String,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_generated: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_memory_mb: Option<u64>,
+}
+
 /// Job assignment from coordinator
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AssignJob {
     pub job_id: String,
-    #[allow(dead_code)]
-    pub workload_id: serde_json::Value,  // Can be string or integer
+    /// Workload ID (for cache tracking)
+    pub workload_id: Option<String>,
     pub input: serde_json::Value,
     #[allow(dead_code)]
     pub lease_expires: i64,
@@ -236,7 +306,7 @@ impl NatsAgent {
         Ok(subscriber)
     }
 
-    /// Send heartbeat
+    /// Send heartbeat (basic)
     pub async fn send_heartbeat(&self, active_jobs: u32) -> Result<()> {
         let msg = Heartbeat {
             host_id: self.host_id.clone(),
@@ -253,6 +323,38 @@ impl NatsAgent {
             .context("Failed to publish heartbeat")?;
 
         debug!("Sent heartbeat");
+        Ok(())
+    }
+
+    /// Send enhanced heartbeat with detailed metrics
+    pub async fn send_enhanced_heartbeat(
+        &self,
+        active_jobs: u32,
+        system: Option<SystemMetricsSnapshot>,
+        gpus: Option<Vec<GpuMetricsSnapshot>>,
+        active_job_metrics: Option<Vec<ActiveJobMetrics>>,
+        cache: Option<CacheMetricsSnapshot>,
+    ) -> Result<()> {
+        let msg = EnhancedHeartbeat {
+            host_id: self.host_id.clone(),
+            status: "online".to_string(),
+            active_jobs,
+            timestamp: chrono_timestamp(),
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            system,
+            gpus,
+            active_job_metrics,
+            cache,
+        };
+
+        let payload = serde_json::to_vec(&msg).context("Failed to serialize enhanced heartbeat")?;
+
+        self.client
+            .publish(subjects::heartbeat(&self.host_id), payload.into())
+            .await
+            .context("Failed to publish enhanced heartbeat")?;
+
+        debug!("Sent enhanced heartbeat with metrics");
         Ok(())
     }
 

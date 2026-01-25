@@ -5,12 +5,16 @@
 //! and reports health/status.
 
 mod agent;
+mod cache;
 mod config;
 mod docker;
 mod executor;
 mod messages;
+mod metrics;
 mod nats;
+mod security;
 mod state;
+mod update;
 mod wasm;
 
 use anyhow::Result;

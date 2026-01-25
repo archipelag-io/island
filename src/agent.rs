@@ -2,6 +2,7 @@
 //!
 //! Coordinates NATS connection, job execution, and heartbeats.
 
+use crate::cache::CacheManager;
 use crate::config::AgentConfig;
 use crate::docker::{self, ContainerConfig, ContainerOutput};
 use crate::messages::WorkloadOutput;
@@ -36,6 +37,7 @@ pub struct Agent {
     docker: Docker,
     nats: NatsAgent,
     state: Arc<RwLock<StateManager>>,
+    cache: Arc<CacheManager>,
     active_jobs: Arc<AtomicU32>,
     shutdown: Arc<AtomicBool>,
     /// Map of job_id -> cancel sender for running jobs
@@ -57,6 +59,9 @@ impl Agent {
         let state = StateManager::new().await?;
         info!("State loaded (paired: {})", state.is_paired());
 
+        // Initialize cache manager for cold-start optimization
+        let cache = CacheManager::new(docker.clone(), config.cache.clone());
+
         // Connect to NATS
         let nats = NatsAgent::connect(&config.coordinator.nats_url, host_id).await?;
 
@@ -65,6 +70,7 @@ impl Agent {
             docker,
             nats,
             state: Arc::new(RwLock::new(state)),
+            cache: Arc::new(cache),
             active_jobs: Arc::new(AtomicU32::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
             job_cancellers: Arc::new(DashMap::new()),
@@ -73,6 +79,11 @@ impl Agent {
 
     /// Run the agent
     pub async fn run(&self) -> Result<()> {
+        // Initialize cache (pre-pull configured images)
+        if let Err(e) = self.cache.init().await {
+            warn!("Cache initialization failed (non-fatal): {}", e);
+        }
+
         // Detect capabilities once at startup
         let capabilities = self.detect_capabilities();
 
@@ -347,15 +358,29 @@ impl Agent {
         let config = self.config.clone();
         let shutdown = self.shutdown.clone();
         let state = self.state.clone();
+        let cache = self.cache.clone();
 
         tokio::spawn(async move {
             let job_id = job.job_id.clone();
+            let workload_id = job.workload_id.clone();
+            let image = job.container_image.clone()
+                .unwrap_or_else(|| config.workload.llm_chat_image.clone());
 
-            if let Err(e) = execute_job(&docker, &nats, &config, &state, job, shutdown, cancel_rx).await {
-                error!("Job {} failed: {}", job_id, e);
-                let _ = nats
-                    .publish_status(&job_id, "failed", Some(e.to_string()))
-                    .await;
+            let result = execute_job(&docker, &nats, &config, &state, &cache, job, shutdown, cancel_rx).await;
+
+            match &result {
+                Ok(()) => {
+                    // Record successful workload run for cache warmth tracking
+                    if let Some(ref wid) = workload_id {
+                        cache.record_workload_run(wid, &image).await;
+                    }
+                }
+                Err(e) => {
+                    error!("Job {} failed: {}", job_id, e);
+                    let _ = nats
+                        .publish_status(&job_id, "failed", Some(e.to_string()))
+                        .await;
+                }
             }
 
             let _ = done_tx.send(job_id).await;
@@ -369,6 +394,7 @@ async fn execute_job(
     nats: &NatsAgent,
     config: &AgentConfig,
     state: &Arc<RwLock<StateManager>>,
+    cache: &Arc<CacheManager>,
     job: AssignJob,
     _shutdown: Arc<AtomicBool>,
     cancel_rx: watch::Receiver<bool>,
@@ -387,7 +413,7 @@ async fn execute_job(
     // Route based on runtime type
     match job.runtime_type.as_str() {
         "wasm" => execute_wasm_job(nats, state, &job, cancel_rx).await,
-        "container" | _ => execute_container_job(docker, nats, config, &job, cancel_rx).await,
+        "container" | _ => execute_container_job(docker, nats, config, cache, &job, cancel_rx).await,
     }
 }
 
@@ -588,6 +614,7 @@ async fn execute_container_job(
     docker: &Docker,
     nats: &NatsAgent,
     config: &AgentConfig,
+    cache: &Arc<CacheManager>,
     job: &AssignJob,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -600,6 +627,15 @@ async fn execute_container_job(
         .unwrap_or_else(|| config.workload.llm_chat_image.clone());
 
     info!("Executing container workload: {}", image);
+
+    // Ensure image is available (pre-pull if not cached)
+    let needed_pull = cache.ensure_image(&image).await
+        .context("Failed to ensure container image")?;
+    if needed_pull {
+        info!("Image {} was pulled (cold start)", image);
+    } else {
+        debug!("Image {} was already cached (warm start)", image);
+    }
 
     // Prepare container config
     let input_json = serde_json::to_string(&job.input).context("Failed to serialize job input")?;

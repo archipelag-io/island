@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use config::{Config, File};
 use serde::Deserialize;
 
+pub use crate::cache::CacheConfig;
+
 /// Agent configuration
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
@@ -23,6 +25,10 @@ pub struct AgentConfig {
 
     /// Workload settings
     pub workload: WorkloadConfig,
+
+    /// Cache settings for cold-start optimization
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 /// Host configuration
@@ -133,6 +139,7 @@ impl Default for AgentConfig {
                 gpu_devices: None,
                 resource_limits: ResourceLimits::default(),
             },
+            cache: CacheConfig::default(),
         }
     }
 }
