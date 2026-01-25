@@ -597,6 +597,7 @@ async fn execute_container_job(
         read_only_rootfs: limits.read_only_rootfs,
         tmpfs_mounts,
         cpu_quota,
+        network_disabled: limits.network_disabled,
     };
 
     // Create channel for container output

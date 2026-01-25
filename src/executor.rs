@@ -47,6 +47,7 @@ pub async fn run_test_job(docker: &Docker, config: &AgentConfig, prompt: &str) -
         read_only_rootfs: limits.read_only_rootfs,
         tmpfs_mounts,
         cpu_quota,
+        network_disabled: limits.network_disabled,
     };
 
     info!("Starting container: {}", container_config.image);

@@ -82,6 +82,11 @@ pub struct ResourceLimits {
     /// CPU quota as percentage (e.g., 200 = 2 cores, 50 = half core)
     /// None = no limit
     pub cpu_percent: Option<u64>,
+
+    /// Disable network access for containers (default: true)
+    /// When true, containers run with network_mode: "none"
+    #[serde(default = "default_network_disabled")]
+    pub network_disabled: bool,
 }
 
 fn default_memory_mb() -> u64 {
@@ -96,6 +101,10 @@ fn default_tmpfs_size_mb() -> u64 {
     256
 }
 
+fn default_network_disabled() -> bool {
+    true
+}
+
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
@@ -103,6 +112,7 @@ impl Default for ResourceLimits {
             read_only_rootfs: default_read_only_rootfs(),
             tmpfs_size_mb: default_tmpfs_size_mb(),
             cpu_percent: None,
+            network_disabled: default_network_disabled(),
         }
     }
 }

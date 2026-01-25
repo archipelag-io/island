@@ -107,6 +107,9 @@ pub struct ContainerConfig {
     /// CPU quota in microseconds per 100ms period (100000 = 1 CPU)
     /// None = no limit
     pub cpu_quota: Option<i64>,
+    /// Disable network access for the container (default: true for security)
+    /// When true, container runs with network_mode: "none"
+    pub network_disabled: bool,
 }
 
 impl Default for ContainerConfig {
@@ -121,6 +124,7 @@ impl Default for ContainerConfig {
             read_only_rootfs: true,
             tmpfs_mounts: None,
             cpu_quota: None,
+            network_disabled: true, // Secure by default: no network access
         }
     }
 }
@@ -185,8 +189,12 @@ pub async fn run_container_streaming(
         tmpfs: config.tmpfs_mounts.clone(),
         // CPU quota (microseconds per 100ms period)
         cpu_quota: config.cpu_quota,
-        // No network access for workloads (security)
-        // network_mode: Some("none".to_string()),
+        // Network isolation: disable network access for workloads (security)
+        network_mode: if config.network_disabled {
+            Some("none".to_string())
+        } else {
+            None
+        },
         ..Default::default()
     };
 
@@ -195,6 +203,10 @@ pub async fn run_container_streaming(
             "Container will use read-only rootfs{}",
             if config.tmpfs_mounts.is_some() { " with tmpfs mounts" } else { "" }
         );
+    }
+
+    if config.network_disabled {
+        debug!("Container network access disabled (network_mode: none)");
     }
 
     let container_config = Config {

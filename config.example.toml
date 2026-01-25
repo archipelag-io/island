@@ -38,3 +38,8 @@ tmpfs_size_mb = 256
 # CPU quota as percentage (e.g., 200 = 2 cores, 50 = half core)
 # Uncomment to limit CPU usage (default: no limit)
 # cpu_percent = 100
+
+# Disable network access for containers (default: true)
+# When true, containers run with network_mode: "none"
+# This prevents workloads from making external network requests
+network_disabled = true

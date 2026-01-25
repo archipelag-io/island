@@ -4,6 +4,7 @@
 //! Workloads receive JSON input via stdin and produce JSON output via stdout.
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -38,6 +39,9 @@ pub struct WasmConfig {
     pub max_fuel: Option<u64>,
     /// Timeout in seconds (default: 60 seconds for WASM)
     pub timeout_seconds: u64,
+    /// Expected SHA256 hash of the WASM module (hex string)
+    /// If provided, the module will be verified before execution
+    pub expected_hash: Option<String>,
 }
 
 impl Default for WasmConfig {
@@ -48,7 +52,46 @@ impl Default for WasmConfig {
             max_memory_bytes: 256 * 1024 * 1024, // 256MB
             max_fuel: Some(100_000_000_000),     // 100 billion instructions
             timeout_seconds: 60,                  // 1 minute timeout for WASM
+            expected_hash: None,
         }
+    }
+}
+
+/// Verify that a WASM module's hash matches the expected hash.
+///
+/// The hash should be in the format "sha256:<hash>" or just "<hash>" (64 hex chars).
+/// Returns Ok(()) if verification passes, Err if it fails.
+pub fn verify_wasm_hash(module_bytes: &[u8], expected_hash: &str) -> Result<()> {
+    // Normalize expected hash (remove sha256: prefix if present)
+    let expected = if expected_hash.starts_with("sha256:") {
+        &expected_hash[7..]
+    } else {
+        expected_hash
+    };
+
+    // Compute SHA256 hash of the module
+    let mut hasher = Sha256::new();
+    hasher.update(module_bytes);
+    let actual_hash = hex::encode(hasher.finalize());
+
+    if actual_hash == expected.to_lowercase() {
+        info!(
+            "WASM module hash verified: {}...{}",
+            &actual_hash[..8],
+            &actual_hash[actual_hash.len() - 8..]
+        );
+        Ok(())
+    } else {
+        warn!(
+            "WASM hash mismatch! Expected: {}..., Got: {}...",
+            &expected[..expected.len().min(16)],
+            &actual_hash[..16]
+        );
+        anyhow::bail!(
+            "WASM module hash verification failed: expected {}, got {}",
+            expected,
+            actual_hash
+        )
     }
 }
 
@@ -95,12 +138,13 @@ impl WasmExecutor {
         let module_path = config.module_path.clone();
         let input = config.input.clone();
         let max_fuel = config.max_fuel;
+        let expected_hash = config.expected_hash.clone();
         let timeout_duration = Duration::from_secs(config.timeout_seconds);
 
         // Run in blocking task since wasmtime operations are sync, with timeout
         let run_result = timeout(timeout_duration, async {
             tokio::task::spawn_blocking(move || {
-                Self::run_sync(&engine, &module_path, &input, max_fuel)
+                Self::run_sync(&engine, &module_path, &input, max_fuel, expected_hash.as_deref())
             })
             .await
             .context("WASM execution task failed")?
@@ -141,11 +185,24 @@ impl WasmExecutor {
         module_path: &str,
         input: &str,
         max_fuel: Option<u64>,
+        expected_hash: Option<&str>,
     ) -> Result<ExecutionResult> {
         debug!("Loading WASM module: {}", module_path);
 
-        // Load the module
-        let module = Module::from_file(engine, module_path)
+        // Read module bytes
+        let module_bytes = std::fs::read(module_path)
+            .with_context(|| format!("Failed to read WASM module: {}", module_path))?;
+
+        // Verify hash if expected
+        if let Some(hash) = expected_hash {
+            verify_wasm_hash(&module_bytes, hash)
+                .context("WASM hash verification failed - refusing to execute")?;
+        } else {
+            debug!("No expected hash provided, skipping verification for WASM module");
+        }
+
+        // Load the module from bytes
+        let module = Module::new(engine, &module_bytes)
             .context("Failed to load WASM module")?;
 
         // Create pipes for stdin/stdout/stderr
