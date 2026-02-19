@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security Vulnerability (Critical)
+    url: mailto:security@archipelag.io
+    about: For critical security issues, please email us directly instead of opening a public issue.
+  - name: Documentation
+    url: https://github.com/archipelag-io/archipelag-io/tree/main/.claude
+    about: Project documentation, architecture decisions, and contributing guide.
