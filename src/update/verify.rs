@@ -30,13 +30,12 @@ use std::path::Path;
 /// # Extract raw bytes from public.pem
 /// ```
 const SIGNING_PUBLIC_KEYS: &[(&str, &[u8; 32])] = &[
-    // Primary signing key (2026-01)
-    // TODO: Replace with actual public key before production use
+    // Primary release signing key (2026-03)
+    // Generated via: openssl genpkey -algorithm ED25519
+    // Private key stored in GitHub Secrets as RELEASE_SIGNING_PRIVATE_KEY
     (
-        "dev-2026-01",
-        // This is a placeholder key for development
-        // In production, this would be the actual Ed25519 public key bytes
-        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        "release-2026-03",
+        b"\xa9\x0c\x6a\xda\x9b\xd0\x73\x19\x1d\x6d\xbd\x9a\x88\x38\xb1\xa6\x85\x14\xa2\x5f\x35\xfc\x3f\xf5\x43\x19\x04\xd1\x5b\x36\x9b\x6d",
     ),
 ];
 
@@ -193,6 +192,40 @@ mod tests {
             checksum,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+
+    #[test]
+    fn test_sign_and_verify_roundtrip() {
+        use ed25519_dalek::{SigningKey, Signer};
+
+        // Generate a test keypair
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes: [u8; 32] = verifying_key.to_bytes();
+
+        // Create a test binary
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"fake binary content for signing test")
+            .unwrap();
+
+        // Compute checksum
+        let checksum = BinaryVerifier::compute_sha256(file.path()).unwrap();
+
+        // Sign the binary content
+        let file_contents = std::fs::read(file.path()).unwrap();
+        let signature = signing_key.sign(&file_contents);
+        let _signature_hex = hex::encode(signature.to_bytes());
+
+        // Verify with the test key using verify_with_key directly
+        let sig = Signature::from_bytes(&signature.to_bytes());
+        assert!(BinaryVerifier::verify_with_key(&file_contents, &sig, &public_key_bytes).is_ok());
+
+        // Verify checksum matches
+        assert!(BinaryVerifier::verify_checksum(file.path(), &checksum).is_ok());
+
+        // Verify wrong data fails
+        let wrong_data = b"tampered content";
+        assert!(BinaryVerifier::verify_with_key(wrong_data, &sig, &public_key_bytes).is_err());
     }
 
     #[test]
