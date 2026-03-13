@@ -22,7 +22,7 @@ mod wasm;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -79,18 +79,29 @@ async fn main() -> Result<()> {
     let config = config::load(&args.config)?;
     info!("Loaded configuration from {}", args.config);
 
-    // Connect to Docker
-    let docker = docker::connect().await?;
-    info!("Connected to Docker daemon");
-
-    // If WASM test mode, run a WASM module
+    // If WASM test mode, run a WASM module (no Docker needed)
     if let Some(wasm_path) = args.test_wasm {
         info!("Running WASM module: {}", wasm_path);
         return run_wasm_test(&wasm_path, &args.wasm_input).await;
     }
 
+    // Connect to Docker (optional — agent can run in WASM-only mode)
+    let docker = match docker::connect().await {
+        Ok(d) => {
+            info!("Connected to Docker daemon");
+            Some(d)
+        }
+        Err(e) => {
+            warn!("Docker not available: {}. Running in WASM-only mode.", e);
+            None
+        }
+    };
+
     // If container test mode, run a single job and exit
     if let Some(prompt) = args.test_job {
+        let docker = docker.ok_or_else(|| {
+            anyhow::anyhow!("Docker is required for container test jobs. Install Docker and try again.")
+        })?;
         info!("Running test job with prompt: {}", prompt);
         return executor::run_test_job(&docker, &config, &prompt).await;
     }

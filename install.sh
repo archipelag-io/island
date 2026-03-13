@@ -5,6 +5,7 @@
 # Environment variables:
 #   ARCHIPELAG_VERSION  - Version to install (default: latest)
 #   ARCHIPELAG_DIR      - Install directory (default: ~/.archipelag)
+#   SKIP_DOCKER         - Set to 1 to skip Docker setup
 
 set -e
 
@@ -104,6 +105,124 @@ verify_binary() {
     fi
 }
 
+# Check for and install Docker if needed
+setup_docker() {
+    if [ "$SKIP_DOCKER" = "1" ]; then
+        warn "Skipping Docker setup (SKIP_DOCKER=1)"
+        DOCKER_AVAILABLE=false
+        return
+    fi
+
+    # Check if Docker is already available
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        info "Docker is already running"
+        DOCKER_AVAILABLE=true
+        return
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        warn "Docker is installed but not running"
+    else
+        info "Docker not found"
+    fi
+
+    if [ "$OS_NAME" = "darwin" ]; then
+        setup_docker_macos
+    elif [ "$OS_NAME" = "linux" ]; then
+        setup_docker_linux
+    fi
+}
+
+setup_docker_macos() {
+    # Prefer Colima (lightweight, free) over Docker Desktop (heavy, license required for commercial use)
+    if command -v colima >/dev/null 2>&1; then
+        info "Starting Colima..."
+        colima start --cpu 2 --memory 4 2>/dev/null && DOCKER_AVAILABLE=true && return
+    fi
+
+    # Check if Homebrew is available
+    if ! command -v brew >/dev/null 2>&1; then
+        warn "Docker is required for container workloads."
+        warn "Install Homebrew first: https://brew.sh"
+        warn "Then run: brew install colima docker && colima start"
+        warn "The agent will run in WASM-only mode for now."
+        DOCKER_AVAILABLE=false
+        return
+    fi
+
+    info "Installing Docker runtime via Colima (lightweight, no Docker Desktop needed)..."
+
+    # Install docker CLI and colima
+    if ! command -v docker >/dev/null 2>&1; then
+        info "Installing Docker CLI..."
+        brew install docker 2>&1 | tail -1
+    fi
+
+    if ! command -v colima >/dev/null 2>&1; then
+        info "Installing Colima..."
+        brew install colima 2>&1 | tail -1
+    fi
+
+    info "Starting Colima VM (this may take a minute on first run)..."
+    if colima start --cpu 2 --memory 4 2>&1 | tail -3; then
+        info "Docker is ready (via Colima)"
+        DOCKER_AVAILABLE=true
+    else
+        warn "Colima failed to start. The agent will run in WASM-only mode."
+        warn "Try manually: colima start"
+        DOCKER_AVAILABLE=false
+    fi
+}
+
+setup_docker_linux() {
+    # Check if Docker is installed but just not running
+    if command -v docker >/dev/null 2>&1; then
+        warn "Docker is installed but the daemon isn't running."
+        warn "Start it with: sudo systemctl start docker"
+        DOCKER_AVAILABLE=false
+        return
+    fi
+
+    # Detect package manager and install
+    if command -v apt-get >/dev/null 2>&1; then
+        info "Installing Docker via apt..."
+        if [ "$(id -u)" -eq 0 ]; then
+            apt-get update -qq && apt-get install -y -qq docker.io >/dev/null
+            systemctl start docker 2>/dev/null || true
+            DOCKER_AVAILABLE=true
+        else
+            warn "Root access needed to install Docker."
+            warn "Run: sudo apt-get install docker.io && sudo systemctl start docker"
+            warn "Then add yourself to the docker group: sudo usermod -aG docker $USER"
+            DOCKER_AVAILABLE=false
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        info "Installing Docker via dnf..."
+        if [ "$(id -u)" -eq 0 ]; then
+            dnf install -y -q docker && systemctl start docker 2>/dev/null || true
+            DOCKER_AVAILABLE=true
+        else
+            warn "Root access needed to install Docker."
+            warn "Run: sudo dnf install docker && sudo systemctl start docker"
+            DOCKER_AVAILABLE=false
+        fi
+    elif command -v pacman >/dev/null 2>&1; then
+        info "Installing Docker via pacman..."
+        if [ "$(id -u)" -eq 0 ]; then
+            pacman -S --noconfirm docker && systemctl start docker 2>/dev/null || true
+            DOCKER_AVAILABLE=true
+        else
+            warn "Root access needed to install Docker."
+            warn "Run: sudo pacman -S docker && sudo systemctl start docker"
+            DOCKER_AVAILABLE=false
+        fi
+    else
+        warn "Could not detect package manager."
+        warn "Install Docker manually: https://docs.docker.com/engine/install/"
+        DOCKER_AVAILABLE=false
+    fi
+}
+
 # Create default config if none exists
 create_config() {
     CONFIG_FILE="$CONFIG_DIR/config.toml"
@@ -191,12 +310,27 @@ print_success() {
     printf "\n"
     printf "  Binary:  %s\n" "$BIN_DIR/$BINARY_NAME"
     printf "  Config:  %s\n" "$CONFIG_DIR/config.toml"
+
+    if [ "$DOCKER_AVAILABLE" = "true" ]; then
+        printf "  Docker:  ready\n"
+    else
+        printf "  Docker:  not available (WASM-only mode)\n"
+    fi
+
     printf "\n"
-    printf "${BOLD}Next steps:${RESET}\n"
+    printf "${BOLD}To start the agent:${RESET}\n"
     printf "\n"
-    printf "  1. Restart your terminal (or run: source %s)\n" "$RC_FILE"
-    printf "  2. Edit your config:  %s %s\n" '${EDITOR:-nano}' "$CONFIG_DIR/config.toml"
-    printf "  3. Start the agent:   archipelag-agent --config %s\n" "$CONFIG_DIR/config.toml"
+
+    case ":$PATH:" in
+        *":$BIN_DIR:"*)
+            printf "  archipelag-agent --agent --config %s\n" "$CONFIG_DIR/config.toml"
+            ;;
+        *)
+            printf "  source %s\n" "$RC_FILE"
+            printf "  archipelag-agent --agent --config %s\n" "$CONFIG_DIR/config.toml"
+            ;;
+    esac
+
     printf "\n"
     printf "  Docs: https://github.com/%s\n" "$REPO"
     printf "\n"
@@ -212,6 +346,7 @@ main() {
     get_latest_version
     download_binary
     verify_binary
+    setup_docker
     create_config
     setup_path
     print_success

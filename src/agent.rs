@@ -42,7 +42,7 @@ const JITTER_MAX: f64 = 1.25;
 /// The main agent that coordinates all activity
 pub struct Agent {
     config: AgentConfig,
-    docker: Docker,
+    docker: Option<Docker>,
     nats: NatsAgent,
     state: Arc<RwLock<StateManager>>,
     cache: Arc<CacheManager>,
@@ -58,7 +58,7 @@ pub struct Agent {
 
 impl Agent {
     /// Create a new agent
-    pub async fn new(config: AgentConfig, docker: Docker) -> Result<Self> {
+    pub async fn new(config: AgentConfig, docker: Option<Docker>) -> Result<Self> {
         // Generate or use existing host ID
         let host_id = config
             .host_id
@@ -71,8 +71,11 @@ impl Agent {
         let state = StateManager::new().await?;
         info!("State loaded (paired: {})", state.is_paired());
 
-        // Initialize cache manager for cold-start optimization
-        let cache = CacheManager::new(docker.clone(), config.cache.clone());
+        // Initialize cache manager for cold-start optimization (requires Docker)
+        let cache = match docker {
+            Some(ref d) => CacheManager::new(d.clone(), config.cache.clone()),
+            None => CacheManager::new_without_docker(config.cache.clone()),
+        };
 
         // Initialize signature verifier
         let mut signature_verifier = SignatureVerifier::new(config.signing.clone());
@@ -581,7 +584,7 @@ impl Agent {
     )
 )]
 async fn execute_job(
-    docker: &Docker,
+    docker: &Option<Docker>,
     nats: &NatsAgent,
     config: &AgentConfig,
     state: &Arc<RwLock<StateManager>>,
@@ -607,6 +610,12 @@ async fn execute_job(
     match job.runtime_type.as_str() {
         "wasm" => execute_wasm_job(nats, state, &job, cancel_rx).await,
         _ => {
+            let docker = docker.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Job {} requires Docker but Docker is not available. Install Docker to run container workloads.",
+                    job_id
+                )
+            })?;
             execute_container_job(
                 docker,
                 nats,

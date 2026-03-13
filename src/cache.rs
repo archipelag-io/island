@@ -101,7 +101,7 @@ pub struct CacheStats {
 
 /// Cache manager for container images and warm workloads
 pub struct CacheManager {
-    docker: Docker,
+    docker: Option<Docker>,
     config: CacheConfig,
     /// Track cached images
     cached_images: Arc<RwLock<HashMap<String, CachedImage>>>,
@@ -114,7 +114,17 @@ impl CacheManager {
     /// Create a new cache manager
     pub fn new(docker: Docker, config: CacheConfig) -> Self {
         Self {
-            docker,
+            docker: Some(docker),
+            config,
+            cached_images: Arc::new(RwLock::new(HashMap::new())),
+            warm_workloads: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a cache manager without Docker (WASM-only mode)
+    pub fn new_without_docker(config: CacheConfig) -> Self {
+        Self {
+            docker: None,
             config,
             cached_images: Arc::new(RwLock::new(HashMap::new())),
             warm_workloads: Arc::new(RwLock::new(HashMap::new())),
@@ -123,6 +133,10 @@ impl CacheManager {
 
     /// Initialize the cache by scanning local Docker images
     pub async fn init(&self) -> Result<()> {
+        if self.docker.is_none() {
+            info!("Container cache disabled (no Docker)");
+            return Ok(());
+        }
         info!("Initializing container cache...");
 
         // Scan existing images
@@ -153,13 +167,17 @@ impl CacheManager {
 
     /// Refresh the cache of locally available images
     pub async fn refresh_image_cache(&self) -> Result<()> {
+        let docker = match &self.docker {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
         let options = ListImagesOptions::<String> {
             all: false,
             ..Default::default()
         };
 
-        let images = self
-            .docker
+        let images = docker
             .list_images(Some(options))
             .await
             .context("Failed to list Docker images")?;
@@ -201,6 +219,10 @@ impl CacheManager {
 
     /// Ensure an image is available locally, pulling if necessary
     pub async fn ensure_image(&self, image: &str) -> Result<bool> {
+        let docker = self.docker.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Docker is not available. Cannot pull image: {}", image)
+        })?;
+
         // Check if already cached
         if self.is_image_cached(image).await {
             // Update last_used time
@@ -225,7 +247,7 @@ impl CacheManager {
             ..Default::default()
         };
 
-        let mut stream = self.docker.create_image(Some(options), None, None);
+        let mut stream = docker.create_image(Some(options), None, None);
 
         while let Some(result) = stream.next().await {
             match result {
