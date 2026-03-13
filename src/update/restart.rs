@@ -11,6 +11,7 @@
 //! - Verify new binary is executable before replacing
 //! - Keep old binary as backup until new one starts successfully
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
