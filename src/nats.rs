@@ -40,7 +40,7 @@ pub mod subjects {
     pub const PAIRING: &str = "coordinator.hosts.pairing";
 }
 
-/// Host capabilities reported during registration
+/// Island capabilities reported during registration
 #[derive(Debug, Clone, Serialize)]
 pub struct HostCapabilities {
     pub gpu_model: Option<String>,
@@ -50,7 +50,7 @@ pub struct HostCapabilities {
     pub region: Option<String>,
 }
 
-/// Host registration message
+/// Island registration message
 #[derive(Debug, Serialize)]
 pub struct RegisterHost {
     pub host_id: String,
@@ -94,7 +94,7 @@ pub struct EnhancedHeartbeat {
 }
 
 /// Performance estimates computed from hardware specs.
-/// Used by the coordinator for workload-to-host fit scoring.
+/// Used by the coordinator for workload-to-Island fit scoring.
 #[derive(Debug, Clone, Serialize)]
 pub struct PerformanceEstimates {
     /// GPU memory bandwidth in GB/s (looked up from GPU model)
@@ -270,7 +270,7 @@ impl NatsAgent {
     /// Connect to NATS server
     pub async fn connect(nats_url: &str, host_id: String) -> Result<Self> {
         let options = ConnectOptions::new()
-            .name(format!("archipelag-agent-{}", &host_id[..8]))
+            .name(format!("archipelag-island-{}", &host_id[..8]))
             .retry_on_initial_connect()
             .connection_timeout(Duration::from_secs(10))
             .ping_interval(Duration::from_secs(10))
@@ -286,7 +286,7 @@ impl NatsAgent {
         Ok(Self { client, host_id })
     }
 
-    /// Register this host with the coordinator
+    /// Register this Island with the coordinator
     pub async fn register(&self, capabilities: HostCapabilities) -> Result<()> {
         let msg = RegisterHost {
             host_id: self.host_id.clone(),
@@ -301,11 +301,11 @@ impl NatsAgent {
             .await
             .context("Failed to publish registration")?;
 
-        info!("Registered host {} with coordinator", self.host_id);
+        info!("Registered Island {} with coordinator", self.host_id);
         Ok(())
     }
 
-    /// Subscribe to job assignments for this host.
+    /// Subscribe to job assignments for this Island.
     ///
     /// Tries JetStream pull consumer first (stream JOBS, consumer host-{id}).
     /// Falls back to core NATS subscription if the stream doesn't exist.
@@ -336,7 +336,7 @@ impl NatsAgent {
         }
     }
 
-    /// Attempt to set up a JetStream pull consumer for durable job delivery.
+    /// Attempt to set up a JetStream pull consumer for durable job delivery on this Island.
     async fn try_jetstream_subscribe(&self) -> Result<JobSubscription> {
         let js = jetstream::new(self.client.clone());
 
@@ -349,11 +349,11 @@ impl NatsAgent {
         let consumer_name = format!("host-{}", self.host_id);
         let filter_subject = subjects::jobs(&self.host_id);
 
-        // Get or create the durable consumer for this host
+        // Get or create the durable consumer for this Island
         let consumer = match stream.get_consumer(&consumer_name).await {
             Ok(consumer) => consumer,
             Err(_) => {
-                // Create durable pull consumer for this host
+                // Create durable pull consumer for this Island
                 let config = jetstream::consumer::pull::Config {
                     durable_name: Some(consumer_name.clone()),
                     ack_policy: jetstream::consumer::AckPolicy::Explicit,
@@ -391,7 +391,7 @@ impl NatsAgent {
         Ok(subscriber)
     }
 
-    /// Subscribe to cancel requests for this host
+    /// Subscribe to cancel requests for this Island
     pub async fn subscribe_cancel(&self) -> Result<Subscriber> {
         let subject = subjects::cancel(&self.host_id);
         let subscriber = self
@@ -560,7 +560,7 @@ impl NatsAgent {
         Ok(())
     }
 
-    /// Get the host ID
+    /// Get the Island's host ID
     pub fn host_id(&self) -> &str {
         &self.host_id
     }

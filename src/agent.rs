@@ -66,7 +66,7 @@ impl Agent {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        info!("Host ID: {}", host_id);
+        info!("Island ID: {}", host_id);
 
         // Load persistent state
         let state = StateManager::new().await?;
@@ -441,7 +441,7 @@ impl Agent {
         )
     }
 
-    /// Detect host capabilities
+    /// Detect Island capabilities
     fn detect_capabilities(&self) -> HostCapabilities {
         // Detect RAM using sysinfo
         let mut sys = System::new_all();
@@ -471,7 +471,7 @@ impl Agent {
     }
 
     /// Compute performance estimates from hardware capabilities.
-    /// These are sent with each heartbeat so the coordinator can rank hosts.
+    /// These are sent with each heartbeat so the coordinator can rank Islands.
     fn compute_performance_estimates(&self, capabilities: &HostCapabilities) -> PerformanceEstimates {
         let gpu_bw = capabilities.gpu_model.as_deref().map(|model| {
             bandwidth_for_gpu(Some(model), capabilities.gpu_vram_mb)
@@ -520,13 +520,13 @@ impl Agent {
         estimates
     }
 
-    /// Check if host needs pairing and request a pairing code if so
+    /// Check if this Island needs pairing and request a pairing code if so
     async fn check_and_request_pairing(&self) {
         // Check if already paired locally
         {
             let state = self.state.read().await;
             if state.is_paired() {
-                info!("Host is already paired (from local state)");
+                info!("Island is already paired (from local state)");
                 return;
             }
         }
@@ -536,10 +536,10 @@ impl Agent {
                 if response.success {
                     if let Some(code) = response.code {
                         info!("========================================");
-                        info!("       HOST PAIRING CODE: {}", code);
+                        info!("       ISLAND PAIRING CODE: {}", code);
                         info!("========================================");
                         if let Some(url) = response.pair_url {
-                            info!("Visit {} to pair this host", url);
+                            info!("Visit {} to pair this Island", url);
                         }
                         if let Some(expires) = response.expires_in_seconds {
                             info!("Code expires in {} minutes", expires / 60);
@@ -548,7 +548,7 @@ impl Agent {
                     }
                 } else if let Some(error) = response.error {
                     if error.contains("already paired") {
-                        info!("Host is already paired to an account");
+                        info!("Island is already paired to an account");
                         // Mark as paired in local state
                         let mut state = self.state.write().await;
                         if let Err(e) = state.set_paired(None).await {

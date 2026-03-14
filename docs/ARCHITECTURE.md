@@ -1,10 +1,10 @@
-# Node Agent Architecture
+# Island Architecture
 
-> Internal developer documentation for the Archipelag.io host agent.
+> Internal developer documentation for the Archipelag.io Island software.
 
 ## Overview
 
-The Node Agent is a Rust-based daemon that runs on host machines, executing workloads assigned by the coordinator. It supports Docker containers and WebAssembly modules.
+The Island is a Rust-based daemon that runs on contributor machines, executing workloads assigned by the coordinator. It supports Docker containers and WebAssembly modules.
 
 ## Tech Stack
 

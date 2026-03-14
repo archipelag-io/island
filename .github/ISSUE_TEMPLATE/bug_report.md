@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug in the Node Agent
+about: Report a bug in the Island software
 title: "[Bug] "
 labels: "type: bug, status: needs-triage"
 assignees: ""
@@ -26,7 +26,7 @@ assignees: ""
 
 ## Environment
 
-- **Node agent version:** `archipelag-node --version`
+- **Island version:** `archipelag-island --version`
 - **Rust version (if building from source):** `rustc --version`
 - **OS and architecture:** (e.g., Ubuntu 22.04 x86_64)
 - **Docker version:** `docker --version`

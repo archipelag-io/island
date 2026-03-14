@@ -10,10 +10,10 @@ pub use crate::security::SigningConfig;
 /// Agent configuration
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
-    /// Host ID (generated on first run if not set)
+    /// Island ID (generated on first run if not set)
     pub host_id: Option<String>,
 
-    /// Host settings
+    /// Island settings
     #[serde(default)]
     pub host: HostConfig,
 
@@ -71,13 +71,13 @@ impl Default for RegistryConfig {
     }
 }
 
-/// Host configuration
+/// Island configuration
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct HostConfig {
     /// Geographic region (e.g., "us-west-2", "eu-central-1")
     pub region: Option<String>,
 
-    /// Human-readable name for this host
+    /// Human-readable name for this Island
     #[allow(dead_code)]
     pub name: Option<String>,
 }
@@ -188,15 +188,20 @@ impl Default for AgentConfig {
 
 /// Load configuration from file
 pub fn load(path: &str) -> Result<AgentConfig> {
+    // Check if config file exists; if not, use defaults
+    if !std::path::Path::new(path).exists() {
+        tracing::warn!("Config file not found at {}, using defaults", path);
+        return Ok(AgentConfig::default());
+    }
+
     let config = Config::builder()
-        .add_source(File::with_name(path).required(false))
+        .add_source(File::with_name(path).required(true))
         .build()
         .context("Failed to build configuration")?;
 
-    // If no config file exists, use defaults
     config
         .try_deserialize()
-        .or_else(|_| Ok(AgentConfig::default()))
+        .context("Failed to parse configuration file")
 }
 
 #[cfg(test)]

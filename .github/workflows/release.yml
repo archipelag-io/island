@@ -44,33 +44,33 @@ jobs:
             os: ubuntu-latest
             platform: linux-x86_64
             use_cross: false
-            binary_name: archipelag-agent
+            binary_name: archipelag-island
             crun_arch: amd64
 
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             platform: linux-aarch64
             use_cross: true
-            binary_name: archipelag-agent
+            binary_name: archipelag-island
             crun_arch: arm64
 
           - target: x86_64-apple-darwin
             os: macos-15
             platform: darwin-x86_64
             use_cross: false
-            binary_name: archipelag-agent
+            binary_name: archipelag-island
 
           - target: aarch64-apple-darwin
             os: macos-14
             platform: darwin-aarch64
             use_cross: false
-            binary_name: archipelag-agent
+            binary_name: archipelag-island
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             platform: windows-x86_64
             use_cross: false
-            binary_name: archipelag-agent.exe
+            binary_name: archipelag-island.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -157,11 +157,11 @@ jobs:
 
           for platform in $PLATFORMS; do
             if [ "$platform" = "windows-x86_64" ]; then
-              src="artifacts/${platform}/archipelag-agent.exe"
-              dest="release/archipelag-agent-${VERSION}-${platform}.exe"
+              src="artifacts/${platform}/archipelag-island.exe"
+              dest="release/archipelag-island-${VERSION}-${platform}.exe"
             else
-              src="artifacts/${platform}/archipelag-agent"
-              dest="release/archipelag-agent-${VERSION}-${platform}"
+              src="artifacts/${platform}/archipelag-island"
+              dest="release/archipelag-island-${VERSION}-${platform}"
             fi
 
             cp "$src" "$dest"
@@ -188,7 +188,7 @@ jobs:
 
           # Create combined checksums file
           cd release/
-          sha256sum archipelag-agent-${VERSION}-* crun-* 2>/dev/null | grep -v '\.sha256$' | grep -v '\.sig$' > "checksums-${VERSION}.sha256"
+          sha256sum archipelag-island-${VERSION}-* crun-* 2>/dev/null | grep -v '\.sha256$' | grep -v '\.sig$' > "checksums-${VERSION}.sha256"
           cd ..
 
       - name: Create GitHub Release
@@ -199,7 +199,7 @@ jobs:
 
           # Collect release assets (binaries + signatures + crun + checksums)
           ASSETS=()
-          for f in release/archipelag-agent-${VERSION}-*; do
+          for f in release/archipelag-island-${VERSION}-*; do
             # Skip individual .sha256 files — we have the combined one
             if [[ "$f" == *.sha256 ]] && [[ "$f" != *checksums* ]]; then
               continue
@@ -229,9 +229,9 @@ jobs:
 
           for platform in $PLATFORMS; do
             if [ "$platform" = "windows-x86_64" ]; then
-              asset_name="archipelag-agent-${VERSION}-${platform}.exe"
+              asset_name="archipelag-island-${VERSION}-${platform}.exe"
             else
-              asset_name="archipelag-agent-${VERSION}-${platform}"
+              asset_name="archipelag-island-${VERSION}-${platform}"
             fi
 
             download_url="https://github.com/${REPO}/releases/download/v${VERSION}/${asset_name}"

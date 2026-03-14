@@ -1,4 +1,4 @@
-//! Security hardening modules for the node agent.
+//! Security hardening modules for the Island software.
 //!
 //! This module provides:
 //! - TLS pinning for coordinator/NATS connections

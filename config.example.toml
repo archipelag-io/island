@@ -1,9 +1,9 @@
-# Archipelag.io Node Agent Configuration
+# Archipelag.io Island Configuration
 # Copy this to config.toml and customize for your environment.
 # Run with: cargo run -- --config config.toml
 
 # =============================================================================
-# HOST IDENTITY
+# ISLAND IDENTITY
 # =============================================================================
 
 [host]
@@ -13,15 +13,15 @@ name = "my-gaming-rig"
 # Geographic region for placement (e.g., "us-east", "eu-west", "ap-southeast")
 region = "us-east"
 
-# Unique host identifier (auto-generated UUID on first run if not set)
-# host_id = "custom-host-id"
+# Unique Island identifier (auto-generated UUID on first run if not set)
+# host_id = "custom-island-id"
 
 # =============================================================================
 # COORDINATOR CONNECTION
 # =============================================================================
 
 [coordinator]
-# NATS server URL for job dispatch and heartbeats
+# NATS server URL for job dispatch and heartbeats from this Island
 nats_url = "nats://localhost:4222"
 
 # =============================================================================
@@ -71,7 +71,7 @@ network_disabled = true
 # =============================================================================
 
 [cache]
-# Pre-pull images on agent startup to reduce first-job latency
+# Pre-pull images on Island startup to reduce first-job latency
 enable_preload = false
 
 # Images to pre-pull (only used when enable_preload = true)

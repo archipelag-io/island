@@ -1,8 +1,8 @@
-//! Archipelag.io Node Agent
+//! Archipelag.io Island
 //!
-//! The node agent runs on host machines and executes workloads dispatched
-//! by the coordinator. It manages container lifecycle, streams output,
-//! and reports health/status.
+//! The Island software runs on contributor machines and executes workloads
+//! dispatched by the coordinator. It manages container lifecycle, streams
+//! output, and reports health/status.
 
 mod agent;
 mod cache;
@@ -28,8 +28,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "archipelag-agent")]
-#[command(about = "Node agent for archipelag.io distributed compute network")]
+#[command(name = "archipelag-island")]
+#[command(about = "Island software for the Archipelag.io distributed compute network")]
 struct Args {
     /// Path to configuration file
     #[arg(short, long, default_value = "config.toml")]
@@ -47,7 +47,7 @@ struct Args {
     #[arg(long, default_value = "{}")]
     wasm_input: String,
 
-    /// Run in agent mode (connect to NATS and wait for jobs)
+    /// Run in Island mode (connect to NATS and wait for jobs)
     #[arg(long)]
     agent: bool,
 }
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    info!("Starting archipelag-agent v{}", env!("CARGO_PKG_VERSION"));
+    info!("Starting archipelag-island v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
     let config = config::load(&args.config)?;
@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
         return run_wasm_test(&wasm_path, &args.wasm_input).await;
     }
 
-    // Connect to Docker (optional — agent can run in WASM-only mode)
+    // Connect to Docker (optional — Island can run in WASM-only mode)
     let docker = match docker::connect().await {
         Ok(d) => {
             info!("Connected to Docker daemon");
@@ -108,19 +108,19 @@ async fn main() -> Result<()> {
         return executor::run_test_job(&docker, &config, &prompt).await;
     }
 
-    // If agent mode, run the full agent loop
+    // If agent mode, run the full Island loop
     if args.agent {
-        info!("Starting agent mode");
+        info!("Starting Island mode");
         let agent = agent::Agent::new(config, docker).await?;
         return agent.run().await;
     }
 
     // Default: show help
-    info!("Agent ready. Options:");
+    info!("Island ready. Options:");
     info!("  --test-job <PROMPT>   Run a container job with the given prompt");
     info!("  --test-wasm <PATH>    Run a WASM module");
     info!("  --wasm-input <JSON>   JSON input for WASM module");
-    info!("  --agent               Run in agent mode (connect to NATS)");
+    info!("  --agent               Run in Island mode (connect to NATS)");
 
     Ok(())
 }

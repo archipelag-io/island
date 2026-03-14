@@ -1,5 +1,5 @@
 #!/bin/sh
-# Archipelag.io Node Agent Installer
+# Archipelag.io Island Installer
 # Usage: curl -fsSL https://archipelag.io/install.sh | sh
 #
 # Environment variables:
@@ -13,7 +13,7 @@ REPO="archipelag-io/node-agent"
 INSTALL_DIR="${ARCHIPELAG_DIR:-$HOME/.archipelag}"
 BIN_DIR="$INSTALL_DIR/bin"
 CONFIG_DIR="$INSTALL_DIR"
-BINARY_NAME="archipelag-agent"
+BINARY_NAME="archipelag-island"
 
 # Colors (disabled if not a terminal)
 if [ -t 1 ]; then
@@ -145,7 +145,7 @@ setup_docker_macos() {
         warn "Docker is required for container workloads."
         warn "Install Homebrew first: https://brew.sh"
         warn "Then run: brew install colima docker && colima start"
-        warn "The agent will run in WASM-only mode for now."
+        warn "The Island will run in WASM-only mode for now."
         DOCKER_AVAILABLE=false
         return
     fi
@@ -168,7 +168,7 @@ setup_docker_macos() {
         info "Docker is ready (via Colima)"
         DOCKER_AVAILABLE=true
     else
-        warn "Colima failed to start. The agent will run in WASM-only mode."
+        warn "Colima failed to start. The Island will run in WASM-only mode."
         warn "Try manually: colima start"
         DOCKER_AVAILABLE=false
     fi
@@ -201,7 +201,7 @@ setup_docker_linux() {
         DOCKER_AVAILABLE=true
     else
         warn "Failed to download crun. Container workloads won't be available."
-        warn "The agent will still run WASM workloads."
+        warn "The Island will still run WASM workloads."
         DOCKER_AVAILABLE=false
     fi
 }
@@ -219,7 +219,7 @@ create_config() {
 
     info "Creating default config at $CONFIG_FILE"
     cat > "$CONFIG_FILE" << EOF
-# Archipelag.io Node Agent Configuration
+# Archipelag.io Island Configuration
 # Docs: https://github.com/${REPO}
 
 [host]
@@ -227,7 +227,7 @@ name = "${HOSTNAME}"
 region = "auto"
 
 [coordinator]
-nats_url = "nats://nats.archipelag.io:4222"
+nats_url = "tls://island:f925ab35cc3c46e51af6bb9fb900ed47e16c940e4e196bc4@sail.archipelag.io:4222"
 
 [workload]
 llm_chat_image = "ghcr.io/archipelag-io/llm-chat:latest"
@@ -289,7 +289,7 @@ setup_path() {
 # Print next steps
 print_success() {
     printf "\n"
-    printf "${BOLD}${GREEN}Archipelag.io Node Agent v${VERSION} installed!${RESET}\n"
+    printf "${BOLD}${GREEN}Archipelag.io Island v${VERSION} installed!${RESET}\n"
     printf "\n"
     printf "  Binary:  %s\n" "$BIN_DIR/$BINARY_NAME"
     printf "  Config:  %s\n" "$CONFIG_DIR/config.toml"
@@ -301,16 +301,16 @@ print_success() {
     fi
 
     printf "\n"
-    printf "${BOLD}To start the agent:${RESET}\n"
+    printf "${BOLD}To start the Island:${RESET}\n"
     printf "\n"
 
     case ":$PATH:" in
         *":$BIN_DIR:"*)
-            printf "  archipelag-agent --agent --config %s\n" "$CONFIG_DIR/config.toml"
+            printf "  archipelag-island --agent --config %s\n" "$CONFIG_DIR/config.toml"
             ;;
         *)
             printf "  source %s\n" "$RC_FILE"
-            printf "  archipelag-agent --agent --config %s\n" "$CONFIG_DIR/config.toml"
+            printf "  archipelag-island --agent --config %s\n" "$CONFIG_DIR/config.toml"
             ;;
     esac
 
@@ -321,7 +321,7 @@ print_success() {
 
 # Main
 main() {
-    printf "\n${BOLD}Archipelag.io Node Agent Installer${RESET}\n\n"
+    printf "\n${BOLD}Archipelag.io Island Installer${RESET}\n\n"
 
     detect_platform
     info "Detected platform: $PLATFORM"

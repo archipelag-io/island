@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Suggest a new feature or improvement for the Node Agent
+about: Suggest a new feature or improvement for the Island software
 title: "[Feature] "
 labels: "type: enhancement, status: needs-triage"
 assignees: ""

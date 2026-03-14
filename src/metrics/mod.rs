@@ -1,4 +1,4 @@
-//! Metrics collection for the node agent.
+//! Metrics collection for the Island software.
 //!
 //! This module provides comprehensive metering for:
 //! - GPU utilization (nvidia-smi)

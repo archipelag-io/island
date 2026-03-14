@@ -379,7 +379,7 @@ impl CacheManager {
         }
     }
 
-    /// Check if this host should be preferred for a workload based on cache state
+    /// Check if this Island should be preferred for a workload based on cache state
     pub async fn get_warmth_score(&self, workload_id: &str, image: &str) -> u32 {
         let mut score = 0;
 

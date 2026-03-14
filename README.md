@@ -1,6 +1,6 @@
-# Archipelag.io Node Agent
+# Archipelag.io Island
 
-The node agent runs on host machines and executes workloads dispatched by the coordinator. It supports Docker containers, WASM modules, and reports hardware capabilities and metrics.
+The Island software runs on contributor machines and executes workloads dispatched by the coordinator. It supports Docker containers, WASM modules, and reports hardware capabilities and metrics.
 
 ## Features
 
@@ -31,7 +31,7 @@ cargo build
 
 # Release build (LTO + stripped)
 cargo build --release
-# Binary: target/release/archipelag-agent
+# Binary: target/release/archipelag-island
 ```
 
 ## Configuration
@@ -88,7 +88,7 @@ allowed = [                              # Allowed registries
 
 ## Usage
 
-### Agent Mode (production)
+### Island Mode (production)
 
 Connect to coordinator and accept jobs:
 
@@ -112,7 +112,7 @@ cargo run -- --test-wasm path/to/module.wasm --wasm-input '{"key":"value"}'
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `RUST_LOG` | `info` | Log level filter (e.g., `debug`, `archipelag_agent=trace`) |
+| `RUST_LOG` | `info` | Log level filter (e.g., `debug`, `archipelag_island=trace`) |
 | `ARCHIPELAG_LOG_JSON` | unset | Enable JSON structured logging |
 | `RUST_BACKTRACE` | unset | Show panic backtraces (`1` or `full`) |
 
@@ -167,18 +167,18 @@ src/
 
 | Subject | Direction | Purpose |
 |---------|-----------|---------|
-| `coordinator.hosts.register` | Agent → Coordinator | Registration with capabilities |
-| `coordinator.hosts.pairing` | Agent → Coordinator | Pairing request (request/reply) |
-| `host.{id}.heartbeat` | Agent → Coordinator | Metrics snapshot (every 10s) |
-| `host.{id}.lease` | Agent → Coordinator | Lease renewal |
-| `host.{id}.jobs` | Coordinator → Agent | Job dispatch (**JetStream**) |
-| `host.{id}.status` | Agent → Coordinator | Job state updates (**JetStream**) |
-| `host.{id}.output` | Agent → Coordinator | Output streaming (**JetStream**) |
-| `host.{id}.cancel` | Coordinator → Agent | Cancel running job |
+| `coordinator.hosts.register` | Island → Coordinator | Registration with capabilities |
+| `coordinator.hosts.pairing` | Island → Coordinator | Pairing request (request/reply) |
+| `host.{id}.heartbeat` | Island → Coordinator | Metrics snapshot (every 10s) |
+| `host.{id}.lease` | Island → Coordinator | Lease renewal |
+| `host.{id}.jobs` | Coordinator → Island | Job dispatch (**JetStream**) |
+| `host.{id}.status` | Island → Coordinator | Job state updates (**JetStream**) |
+| `host.{id}.output` | Island → Coordinator | Output streaming (**JetStream**) |
+| `host.{id}.cancel` | Coordinator → Island | Cancel running job |
 
 ### JetStream Subscription
 
-The agent prefers JetStream pull consumers for reliable job delivery:
+The Island prefers JetStream pull consumers for reliable job delivery:
 - Stream: `JOBS`, Consumer: `host-{host_id}`
 - Ack policy: explicit (ack-on-spawn)
 - Max deliver: 5, Ack wait: 60s
@@ -249,7 +249,7 @@ Run with `mise run bench` or `cargo bench`.
 
 ## Troubleshooting
 
-### Agent can't connect to NATS
+### Island can't connect to NATS
 - Ensure NATS is running: `curl http://localhost:8222/varz`
 - Check `nats_url` in `config.toml`
 - Verify JetStream is enabled: `curl http://localhost:8222/jsz`
@@ -262,7 +262,7 @@ Run with `mise run bench` or `cargo bench`.
 - Verify NVIDIA drivers: `nvidia-smi`
 - Install NVIDIA Container Toolkit
 - Set `gpu_devices = ["0"]` in config
-- Agent gracefully falls back to CPU-only if nvidia-smi unavailable
+- Island gracefully falls back to CPU-only if nvidia-smi unavailable
 
 ### Image pull failures
 - Check registry allowlist in `[registry]` config
@@ -278,7 +278,7 @@ Run with `mise run bench` or `cargo bench`.
 |----------|------|
 | [Coordinator](../app/) | Elixir control plane |
 | [Infrastructure](../infra/) | Docker Compose, E2E tests |
-| [Architecture](docs/ARCHITECTURE.md) | Internal architecture doc |
+| [Architecture](docs/ARCHITECTURE.md) | Internal Island architecture doc |
 | [Example Config](config.example.toml) | Full configuration reference |
 
 ## License

@@ -1,7 +1,7 @@
-//! Local state management for the node agent
+//! Local state management for the Island software
 //!
 //! Handles:
-//! - Pairing state persistence (whether host is paired)
+//! - Pairing state persistence (whether this Island is paired)
 //! - WASM module caching (download and cache modules)
 
 use anyhow::{Context, Result};
@@ -19,18 +19,18 @@ const STATE_FILE: &str = "state.json";
 /// WASM cache directory name
 const WASM_CACHE_DIR: &str = "wasm-cache";
 
-/// Persistent state for the node agent
+/// Persistent state for the Island software
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct AgentState {
-    /// Whether this host has been paired to an account
+    /// Whether this Island has been paired to an account
     pub paired: bool,
-    /// Account ID this host is paired to (if any)
+    /// Account ID this Island is paired to (if any)
     pub account_id: Option<String>,
     /// Timestamp when pairing occurred
     pub paired_at: Option<String>,
 }
 
-/// State manager for the node agent
+/// State manager for the Island software
 pub struct StateManager {
     state_dir: PathBuf,
     state: AgentState,
@@ -70,12 +70,12 @@ impl StateManager {
         Ok(Self { state_dir, state })
     }
 
-    /// Check if the host is already paired
+    /// Check if this Island is already paired
     pub fn is_paired(&self) -> bool {
         self.paired
     }
 
-    /// Mark the host as paired
+    /// Mark this Island as paired
     pub async fn set_paired(&mut self, account_id: Option<String>) -> Result<()> {
         self.state.paired = true;
         self.state.account_id = account_id;

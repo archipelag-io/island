@@ -23,7 +23,7 @@ Closes #
 - [ ] Tests added for new functionality
 - [ ] Documentation updated if applicable
 
-### Node Agent-specific
+### Island-specific
 
 - [ ] New tests use `#[cfg(test)]` inline modules in the source file
 - [ ] `ContainerConfig` construction sites updated (check both `agent.rs` and `executor.rs`)
