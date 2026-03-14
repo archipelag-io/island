@@ -427,17 +427,8 @@ pub async fn run_container_streaming(
         .await
         .context("Failed to attach to container")?;
 
-    // Start container
-    debug!("Starting container: {}", container_name);
-    docker
-        .start_container(&container_id, None::<StartContainerOptions<String>>)
-        .await
-        .context("Failed to start container")?;
-
-    // Small delay to let container process start before sending input
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    // Send input to stdin
+    // Send input to stdin BEFORE starting the container.
+    // This ensures the data is in the pipe buffer when the container process starts reading.
     use tokio::io::AsyncWriteExt;
     debug!("Sending input to container: {} bytes", config.input.len());
     attached
@@ -445,10 +436,16 @@ pub async fn run_container_streaming(
         .write_all(config.input.as_bytes())
         .await
         .context("Failed to write to container stdin")?;
-    // Ensure newline at end for JSON parsers
     attached.input.write_all(b"\n").await?;
     attached.input.shutdown().await?;
     debug!("Input sent and stdin closed");
+
+    // Start container (input is already in the pipe buffer)
+    debug!("Starting container: {}", container_name);
+    docker
+        .start_container(&container_id, None::<StartContainerOptions<String>>)
+        .await
+        .context("Failed to start container")?;
 
     // Run container with timeout
     let run_result = timeout(timeout_duration, async {

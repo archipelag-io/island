@@ -134,6 +134,14 @@ impl Agent {
             allowlist
         };
 
+        // Initialize model cache for GGUF/ONNX/diffusers models
+        let model_cache = Arc::new(
+            crate::model_cache::ModelCache::new(&config.model_cache)
+                .context("Failed to initialize model cache")?
+        );
+        model_cache.init().await?;
+        state.set_model_cache(model_cache);
+
         // Connect to NATS
         let nats = NatsAgent::connect(&config.coordinator.nats_url, host_id).await?;
 
@@ -500,7 +508,14 @@ impl Agent {
         let wasm_mem = capabilities.ram_mb * 3 / 4;
 
         // Supported runtimes — container and wasm are always available
-        let runtimes = vec!["container".to_string(), "wasm".to_string()];
+        #[allow(unused_mut)]
+        let mut runtimes = vec!["container".to_string(), "wasm".to_string()];
+        #[cfg(feature = "onnx")]
+        runtimes.push("onnx".to_string());
+        #[cfg(feature = "gguf")]
+        runtimes.push("llmcpp".to_string());
+        #[cfg(feature = "diffusers")]
+        runtimes.push("diffusers".to_string());
 
         let estimates = PerformanceEstimates {
             gpu_bandwidth_gb_s: gpu_bw,
@@ -663,6 +678,12 @@ async fn execute_job(
     // Route based on runtime type
     match job.runtime_type.as_str() {
         "wasm" => execute_wasm_job(nats, state, &job, cancel_rx).await,
+        #[cfg(feature = "onnx")]
+        "onnx" => crate::onnx::execute_onnx_job(nats, state, &job, cancel_rx).await,
+        #[cfg(feature = "gguf")]
+        "llmcpp" => crate::gguf::execute_gguf_job(nats, state, config, &job, cancel_rx).await,
+        #[cfg(feature = "diffusers")]
+        "diffusers" => crate::diffusers::execute_diffusers_job(nats, state, config, &job, cancel_rx).await,
         _ => {
             let docker = docker.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(

@@ -8,9 +8,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
+
+use crate::model_cache::ModelCache;
 
 /// Default state directory (relative to home)
 const STATE_DIR: &str = ".island";
@@ -37,6 +40,7 @@ pub struct AgentState {
 pub struct StateManager {
     state_dir: PathBuf,
     state: AgentState,
+    model_cache: Option<Arc<ModelCache>>,
 }
 
 impl StateManager {
@@ -70,7 +74,7 @@ impl StateManager {
 
         debug!("State loaded: paired={}", state.paired);
 
-        Ok(Self { state_dir, state })
+        Ok(Self { state_dir, state, model_cache: None })
     }
 
     /// Check if this Island is already paired
@@ -107,6 +111,18 @@ impl StateManager {
             .context("Failed to write state file")?;
         debug!("State saved to {:?}", state_file);
         Ok(())
+    }
+
+    /// Set the model cache instance
+    #[allow(dead_code)]
+    pub fn set_model_cache(&mut self, cache: Arc<ModelCache>) {
+        self.model_cache = Some(cache);
+    }
+
+    /// Get a reference to the model cache
+    #[allow(dead_code)]
+    pub fn model_cache(&self) -> Option<&Arc<ModelCache>> {
+        self.model_cache.as_ref()
     }
 
     /// Get the path to a cached WASM module, downloading if necessary

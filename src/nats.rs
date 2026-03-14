@@ -179,6 +179,22 @@ pub struct AssignJob {
     pub wasm_url: Option<String>,
     /// Expected hash of the WASM module
     pub wasm_hash: Option<String>,
+    /// For GGUF/llmcpp and diffusers workloads
+    #[allow(dead_code)]
+    pub model_url: Option<String>,
+    #[allow(dead_code)]
+    pub model_hash: Option<String>,
+    #[allow(dead_code)]
+    pub model_context_size: Option<u32>,
+    #[allow(dead_code)]
+    pub model_temperature: Option<f32>,
+    /// For ONNX workloads
+    #[allow(dead_code)]
+    pub onnx_model_url: Option<String>,
+    #[allow(dead_code)]
+    pub onnx_model_hash: Option<String>,
+    #[allow(dead_code)]
+    pub onnx_task_type: Option<String>,
     /// Sandbox tier for trust-level-based resource limits
     /// Values: "restricted", "standard", "elevated"
     pub sandbox_tier: Option<String>,

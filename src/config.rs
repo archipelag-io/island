@@ -40,6 +40,35 @@ pub struct AgentConfig {
     /// Registry allowlist settings
     #[serde(default)]
     pub registry: RegistryConfig,
+
+    /// Model cache settings (for GGUF, ONNX, diffusers models)
+    #[serde(default)]
+    pub model_cache: ModelCacheConfig,
+}
+
+/// Model cache configuration for downloaded ML models
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModelCacheConfig {
+    /// Maximum cache size in GB (default: 20)
+    #[serde(default = "default_max_model_cache_gb")]
+    pub max_cache_gb: u64,
+
+    /// Cache directory (default: ~/.island/model-cache)
+    #[serde(default)]
+    pub cache_dir: Option<String>,
+}
+
+fn default_max_model_cache_gb() -> u64 {
+    20
+}
+
+impl Default for ModelCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_cache_gb: default_max_model_cache_gb(),
+            cache_dir: None,
+        }
+    }
 }
 
 /// Registry allowlist configuration
@@ -199,6 +228,7 @@ impl Default for AgentConfig {
             cache: CacheConfig::default(),
             signing: SigningConfig::default(),
             registry: RegistryConfig::default(),
+            model_cache: ModelCacheConfig::default(),
         }
     }
 }

@@ -7,14 +7,21 @@
 mod agent;
 mod cache;
 mod config;
+#[cfg(feature = "diffusers")]
+mod diffusers;
 mod docker;
 mod executor;
+#[cfg(feature = "gguf")]
+mod gguf;
 mod messages;
 #[allow(dead_code)]
 mod metrics;
+mod model_cache;
 mod nats;
 #[cfg(target_os = "linux")]
 mod oci;
+#[cfg(feature = "onnx")]
+mod onnx;
 #[allow(dead_code)]
 mod security;
 mod state;
