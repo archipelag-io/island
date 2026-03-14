@@ -1,6 +1,6 @@
 [package]
 name = "archipelag-agent"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Node agent for archipelag.io distributed compute network"
 authors = ["archipelag.io <hello@archipelag.io>"]
