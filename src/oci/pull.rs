@@ -54,8 +54,9 @@ pub async fn pull_image(image: &str, cache_dir: &Path) -> Result<()> {
     // Pull config blob
     let config_path = image_cache.join("config.json");
     if !config_path.exists() {
-        let config_data = client
-            .pull_blob(&reference, &manifest.config.digest, &auth)
+        let mut config_data = Vec::new();
+        client
+            .pull_blob(&reference, &manifest.config, &mut config_data)
             .await
             .context("Failed to pull image config")?;
         fs::write(&config_path, &config_data).await?;
@@ -80,8 +81,9 @@ pub async fn pull_image(image: &str, cache_dir: &Path) -> Result<()> {
             layer.size
         );
 
-        let layer_data = client
-            .pull_blob(&reference, &layer.digest, &auth)
+        let mut layer_data = Vec::new();
+        client
+            .pull_blob(&reference, layer, &mut layer_data)
             .await
             .context(format!("Failed to pull layer {}", layer.digest))?;
 
