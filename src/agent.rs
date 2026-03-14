@@ -60,16 +60,17 @@ pub struct Agent {
 impl Agent {
     /// Create a new agent
     pub async fn new(config: AgentConfig, docker: Option<Docker>) -> Result<Self> {
-        // Generate or use existing host ID
-        let host_id = config
-            .host_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Load persistent state
+        let mut state = StateManager::new().await?;
+
+        // Use config host_id if set, otherwise get/create a stable one from state
+        let host_id = if let Some(ref id) = config.host_id {
+            id.clone()
+        } else {
+            state.get_or_create_host_id().await?
+        };
 
         info!("Island ID: {}", host_id);
-
-        // Load persistent state
-        let state = StateManager::new().await?;
         info!("State loaded (paired: {})", state.is_paired());
 
         // Initialize cache manager for cold-start optimization (requires Docker)

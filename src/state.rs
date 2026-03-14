@@ -22,6 +22,9 @@ const WASM_CACHE_DIR: &str = "wasm-cache";
 /// Persistent state for the Island software
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct AgentState {
+    /// Stable Island ID (generated on first run, persisted across restarts)
+    #[serde(default)]
+    pub host_id: Option<String>,
     /// Whether this Island has been paired to an account
     pub paired: bool,
     /// Account ID this Island is paired to (if any)
@@ -73,6 +76,17 @@ impl StateManager {
     /// Check if this Island is already paired
     pub fn is_paired(&self) -> bool {
         self.paired
+    }
+
+    /// Get or generate a stable host ID (persisted across restarts)
+    pub async fn get_or_create_host_id(&mut self) -> Result<String> {
+        if let Some(ref id) = self.state.host_id {
+            return Ok(id.clone());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.state.host_id = Some(id.clone());
+        self.save().await?;
+        Ok(id)
     }
 
     /// Mark this Island as paired
@@ -305,6 +319,7 @@ mod tests {
     #[test]
     fn test_agent_state_serialization() {
         let state = AgentState {
+            host_id: None,
             paired: true,
             account_id: Some("user-123".to_string()),
             paired_at: Some("1234567890".to_string()),
