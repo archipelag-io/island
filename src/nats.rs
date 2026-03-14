@@ -161,7 +161,8 @@ pub struct ActiveJobMetrics {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AssignJob {
     pub job_id: String,
-    /// Workload ID (for cache tracking)
+    /// Workload ID (for cache tracking) — accepts both string and integer from coordinator
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     pub workload_id: Option<String>,
     pub input: serde_json::Value,
     #[allow(dead_code)]
@@ -185,6 +186,46 @@ pub struct AssignJob {
 
 fn default_runtime_type() -> String {
     "container".to_string()
+}
+
+/// Deserialize a field that may be a string or an integer (coordinator sends workload_id as int)
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrInt;
+
+    impl<'de> de::Visitor<'de> for StringOrInt {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string, integer, or null")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrInt)
 }
 
 /// Job status update
