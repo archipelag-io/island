@@ -175,50 +175,33 @@ setup_docker_macos() {
 }
 
 setup_docker_linux() {
-    # Check if Docker is installed but just not running
-    if command -v docker >/dev/null 2>&1; then
-        warn "Docker is installed but the daemon isn't running."
-        warn "Start it with: sudo systemctl start docker"
-        DOCKER_AVAILABLE=false
+    # On Linux, we bundle crun (lightweight OCI runtime) — no Docker needed
+    info "Setting up bundled container runtime (crun)..."
+
+    # Map architecture for crun binary name
+    case "$ARCH_NAME" in
+        x86_64)   CRUN_PLATFORM="linux-x86_64" ;;
+        aarch64)  CRUN_PLATFORM="linux-aarch64" ;;
+        *)        warn "No bundled crun for $ARCH_NAME"; DOCKER_AVAILABLE=false; return ;;
+    esac
+
+    CRUN_URL="https://github.com/${REPO}/releases/download/v${VERSION}/crun-${CRUN_PLATFORM}"
+    CRUN_PATH="$BIN_DIR/crun"
+
+    if [ -f "$CRUN_PATH" ]; then
+        info "crun already installed"
+        DOCKER_AVAILABLE=true
         return
     fi
 
-    # Detect package manager and install
-    if command -v apt-get >/dev/null 2>&1; then
-        info "Installing Docker via apt..."
-        if [ "$(id -u)" -eq 0 ]; then
-            apt-get update -qq && apt-get install -y -qq docker.io >/dev/null
-            systemctl start docker 2>/dev/null || true
-            DOCKER_AVAILABLE=true
-        else
-            warn "Root access needed to install Docker."
-            warn "Run: sudo apt-get install docker.io && sudo systemctl start docker"
-            warn "Then add yourself to the docker group: sudo usermod -aG docker $USER"
-            DOCKER_AVAILABLE=false
-        fi
-    elif command -v dnf >/dev/null 2>&1; then
-        info "Installing Docker via dnf..."
-        if [ "$(id -u)" -eq 0 ]; then
-            dnf install -y -q docker && systemctl start docker 2>/dev/null || true
-            DOCKER_AVAILABLE=true
-        else
-            warn "Root access needed to install Docker."
-            warn "Run: sudo dnf install docker && sudo systemctl start docker"
-            DOCKER_AVAILABLE=false
-        fi
-    elif command -v pacman >/dev/null 2>&1; then
-        info "Installing Docker via pacman..."
-        if [ "$(id -u)" -eq 0 ]; then
-            pacman -S --noconfirm docker && systemctl start docker 2>/dev/null || true
-            DOCKER_AVAILABLE=true
-        else
-            warn "Root access needed to install Docker."
-            warn "Run: sudo pacman -S docker && sudo systemctl start docker"
-            DOCKER_AVAILABLE=false
-        fi
+    info "Downloading crun for ${CRUN_PLATFORM}..."
+    if curl -fsSL -o "$CRUN_PATH" "$CRUN_URL"; then
+        chmod +x "$CRUN_PATH"
+        info "crun installed to $CRUN_PATH"
+        DOCKER_AVAILABLE=true
     else
-        warn "Could not detect package manager."
-        warn "Install Docker manually: https://docs.docker.com/engine/install/"
+        warn "Failed to download crun. Container workloads won't be available."
+        warn "The agent will still run WASM workloads."
         DOCKER_AVAILABLE=false
     fi
 }

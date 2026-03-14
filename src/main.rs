@@ -13,6 +13,8 @@ mod messages;
 #[allow(dead_code)]
 mod metrics;
 mod nats;
+#[cfg(target_os = "linux")]
+mod oci;
 #[allow(dead_code)]
 mod security;
 mod state;

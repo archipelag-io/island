@@ -45,12 +45,14 @@ jobs:
             platform: linux-x86_64
             use_cross: false
             binary_name: archipelag-agent
+            crun_arch: amd64
 
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             platform: linux-aarch64
             use_cross: true
             binary_name: archipelag-agent
+            crun_arch: arm64
 
           - target: x86_64-apple-darwin
             os: macos-15
@@ -105,17 +107,31 @@ jobs:
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Download crun (Linux only)
+        if: matrix.crun_arch
+        run: |
+          CRUN_VERSION="1.26"
+          CRUN_URL="https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-${{ matrix.crun_arch }}"
+          echo "Downloading crun ${CRUN_VERSION} for ${{ matrix.crun_arch }}..."
+          curl -fsSL -o crun "$CRUN_URL"
+          chmod +x crun
+          ./crun --version || echo "crun downloaded (can't run cross-arch on this runner)"
+
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p artifacts
           cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "artifacts/${{ matrix.binary_name }}"
+          # Include crun for Linux targets
+          if [ -f crun ]; then
+            cp crun artifacts/crun
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
-          path: artifacts/${{ matrix.binary_name }}
+          path: artifacts/
 
   release:
     name: Sign & Release
@@ -163,9 +179,16 @@ jobs:
 
           rm -f /tmp/signing-key.pem
 
+          # Copy bundled crun binaries for Linux platforms
+          for platform in linux-x86_64 linux-aarch64; do
+            if [ -f "artifacts/${platform}/crun" ]; then
+              cp "artifacts/${platform}/crun" "release/crun-${platform}"
+            fi
+          done
+
           # Create combined checksums file
           cd release/
-          sha256sum archipelag-agent-${VERSION}-* | grep -v '\.sha256$' | grep -v '\.sig$' > "checksums-${VERSION}.sha256"
+          sha256sum archipelag-agent-${VERSION}-* crun-* 2>/dev/null | grep -v '\.sha256$' | grep -v '\.sig$' > "checksums-${VERSION}.sha256"
           cd ..
 
       - name: Create GitHub Release
@@ -174,7 +197,7 @@ jobs:
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
 
-          # Collect release assets (binaries + signatures + checksums)
+          # Collect release assets (binaries + signatures + crun + checksums)
           ASSETS=()
           for f in release/archipelag-agent-${VERSION}-*; do
             # Skip individual .sha256 files — we have the combined one
@@ -182,6 +205,10 @@ jobs:
               continue
             fi
             ASSETS+=("$f")
+          done
+          # Include bundled crun binaries
+          for f in release/crun-*; do
+            [ -f "$f" ] && ASSETS+=("$f")
           done
           ASSETS+=("release/checksums-${VERSION}.sha256")
 
