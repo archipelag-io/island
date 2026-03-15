@@ -197,6 +197,28 @@ During execution, the runtime publishes progress events to NATS:
 - The CLIP text encoder is dropped after encoding to free memory before loading the UNet and VAE.
 - Cancellation is checked before download, after download, and at each diffusion step.
 
+## Job Status Protocol
+
+All runtimes use the same NATS status protocol. The coordinator expects these exact state strings:
+
+| Status | When Sent | Coordinator Transition |
+|--------|-----------|----------------------|
+| `"started"` | Before inference begins | `assigned → started` |
+| `"succeeded"` | After inference completes successfully | `started → succeeded` |
+| `"failed"` | On any error | `started → failed` |
+| `"cancelled"` | If cancel signal received | `started → cancelled` |
+
+**Important:** The status must be `"succeeded"`, not `"completed"`. The coordinator's state machine rejects `"completed"` as an invalid transition. This was a bug fixed in commit `fff32bf`.
+
+Output chunks are published to `host.<host_id>.output` and status updates to `host.<host_id>.status`. Both subjects are captured by JetStream streams (`JOB_OUTPUT` and `JOB_STATUS`).
+
 ## Model Resolution
 
 All three runtimes use the model cache for downloading and caching models. The `hf://` URI scheme is the standard way to reference models. See [model-cache.md](model-cache.md) for full details on URI resolution, caching, and eviction.
+
+## Common Gotchas
+
+- **Build deps:** GGUF requires `cmake` and `libclang-dev` on the build machine (for llama.cpp compilation via bindgen).
+- **CPU performance:** Mistral 7B on CPU generates ~1 token/second on a 12-core machine. TinyLlama 1.1B is much faster (~30 tokens/second). For demos, prefer smaller models.
+- **VRAM requirements:** GGUF models run on CPU, so their `required_vram_mb` in the DB should be `NULL` (not a GPU VRAM number). Otherwise the coordinator's placement query rejects CPU-only Islands.
+- **Gated HuggingFace models:** Some models (e.g., Qwen3.5) require an HF token. Set `hf_token` in `[model_cache]` config or the `HF_TOKEN` env var. The default preload list uses only public models.
