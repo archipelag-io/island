@@ -35,6 +35,7 @@ struct CachedModel {
 pub struct ModelCache {
     cache_dir: PathBuf,
     max_cache_bytes: u64,
+    hf_token: Option<String>,
     entries: RwLock<HashMap<String, CachedModel>>,
 }
 
@@ -55,9 +56,16 @@ impl ModelCache {
 
         let max_cache_bytes = config.max_cache_gb * 1024 * 1024 * 1024;
 
+        // HF token: prefer config, fall back to HF_TOKEN env var
+        let hf_token = config
+            .hf_token
+            .clone()
+            .or_else(|| std::env::var("HF_TOKEN").ok());
+
         let cache = Self {
             cache_dir,
             max_cache_bytes,
+            hf_token,
             entries: RwLock::new(HashMap::new()),
         };
 
@@ -116,7 +124,7 @@ impl ModelCache {
         uri: &str,
         expected_hash: Option<&str>,
     ) -> Result<PathBuf> {
-        let resolved = resolve_uri(uri).await?;
+        let resolved = resolve_uri(uri, self.hf_token.as_deref()).await?;
         let download_url = &resolved.url;
         let display_name = &resolved.display_name;
 
@@ -151,10 +159,13 @@ impl ModelCache {
         let model_path = model_dir.join(filename);
         let tmp_path = model_dir.join(format!("{}.tmp", filename));
 
-        // Streaming download
+        // Streaming download (with optional HF auth for gated models)
         let client = reqwest::Client::new();
-        let response = client
-            .get(download_url)
+        let mut request = client.get(download_url);
+        if let Some(token) = &self.hf_token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("Failed to download model from {}", download_url))?;
@@ -300,9 +311,9 @@ struct ResolvedUri {
 /// - `hf://repo_id` — auto-discover the main model file via HF Hub API
 /// - `hf://repo_id:filename` — specific file in the repo
 /// - `https://...` — pass through as-is
-async fn resolve_uri(uri: &str) -> Result<ResolvedUri> {
+async fn resolve_uri(uri: &str, hf_token: Option<&str>) -> Result<ResolvedUri> {
     if let Some(hf_ref) = uri.strip_prefix("hf://") {
-        resolve_huggingface(hf_ref).await
+        resolve_huggingface(hf_ref, hf_token).await
     } else {
         // Direct URL
         let filename = uri
@@ -325,7 +336,7 @@ async fn resolve_uri(uri: &str) -> Result<ResolvedUri> {
 ///   - `distilbert-base-uncased-finetuned-sst-2-english`
 ///   - `TheBloke/Mistral-7B-Instruct-v0.2-GGUF:mistral-7b-instruct-v0.2.Q4_K_M.gguf`
 ///   - `runwayml/stable-diffusion-v1-5`
-async fn resolve_huggingface(hf_ref: &str) -> Result<ResolvedUri> {
+async fn resolve_huggingface(hf_ref: &str, hf_token: Option<&str>) -> Result<ResolvedUri> {
     let (repo_id, explicit_filename) = match hf_ref.split_once(':') {
         Some((repo, file)) => (repo, Some(file)),
         None => (hf_ref, None),
@@ -348,9 +359,13 @@ async fn resolve_huggingface(hf_ref: &str) -> Result<ResolvedUri> {
         info!("Querying HuggingFace Hub: {}", api_url);
 
         let client = reqwest::Client::new();
-        let response = client
+        let mut request = client
             .get(&api_url)
-            .header("User-Agent", "archipelag-island/0.4")
+            .header("User-Agent", "archipelag-island/0.4");
+        if let Some(token) = hf_token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("Failed to query HF Hub for {}", repo_id))?;
@@ -506,6 +521,7 @@ mod tests {
         let config = ModelCacheConfig {
             max_cache_gb: 1,
             cache_dir: Some(dir.path().to_string_lossy().to_string()),
+            hf_token: None,
         };
         let cache = ModelCache::new(&config).unwrap();
         cache.init().await.unwrap();
@@ -513,14 +529,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_direct_url() {
-        let resolved = resolve_uri("https://example.com/models/bert.onnx").await.unwrap();
+        let resolved = resolve_uri("https://example.com/models/bert.onnx", None).await.unwrap();
         assert_eq!(resolved.url, "https://example.com/models/bert.onnx");
         assert_eq!(resolved.filename, "bert.onnx");
     }
 
     #[tokio::test]
     async fn test_resolve_hf_with_filename() {
-        let resolved = resolve_uri("hf://TheBloke/Mistral-7B-GGUF:mistral-7b.Q4_K_M.gguf").await.unwrap();
+        let resolved = resolve_uri("hf://TheBloke/Mistral-7B-GGUF:mistral-7b.Q4_K_M.gguf", None).await.unwrap();
         assert_eq!(
             resolved.url,
             "https://huggingface.co/TheBloke/Mistral-7B-GGUF/resolve/main/mistral-7b.Q4_K_M.gguf"

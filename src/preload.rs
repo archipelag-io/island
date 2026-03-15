@@ -72,11 +72,11 @@ pub fn select_starter_models(
         return models;
     }
 
-    // Small tier: 2-8 GB RAM — smallest LLM
+    // Small tier: 2-8 GB RAM — smallest public LLM
     #[cfg(feature = "gguf")]
     models.push(PreloadEntry {
-        uri: "hf://Qwen/Qwen3.5-0.8B-GGUF".into(),
-        name: "Qwen3.5-0.8B (GGUF, 600MB)".into(),
+        uri: "hf://TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".into(),
+        name: "TinyLlama 1.1B Chat (GGUF, 670MB)".into(),
         min_ram_mb: 2048,
         min_vram_mb: 0,
         runtime: "llmcpp",
@@ -96,15 +96,15 @@ pub fn select_starter_models(
         #[cfg(feature = "onnx")]
         {
             models.push(PreloadEntry {
-                uri: "hf://distilbert-base-uncased-finetuned-sst-2-english".into(),
-                name: "DistilBERT Sentiment (ONNX)".into(),
+                uri: "hf://distilbert-base-uncased-finetuned-sst-2-english:model.onnx".into(),
+                name: "DistilBERT Sentiment (ONNX, 268MB)".into(),
                 min_ram_mb: 4096,
                 min_vram_mb: 0,
                 runtime: "onnx",
             });
             models.push(PreloadEntry {
-                uri: "hf://sentence-transformers/all-MiniLM-L6-v2".into(),
-                name: "MiniLM-L6 Embeddings (ONNX)".into(),
+                uri: "hf://sentence-transformers/all-MiniLM-L6-v2:onnx/model.onnx".into(),
+                name: "MiniLM-L6 Embeddings (ONNX, 90MB)".into(),
                 min_ram_mb: 4096,
                 min_vram_mb: 0,
                 runtime: "onnx",
@@ -241,9 +241,9 @@ mod tests {
     #[test]
     fn test_small_tier_gets_small_model() {
         let models = select_starter_models(4096, None, &default_config());
-        // Should have at least one model (qwen3.5-0.8b) if gguf feature is on
+        // Should have at least one model (TinyLlama) if gguf feature is on
         #[cfg(feature = "gguf")]
-        assert!(models.iter().any(|m| m.uri.contains("Qwen3.5-0.8B")));
+        assert!(models.iter().any(|m| m.uri.contains("TinyLlama")));
     }
 
     #[test]

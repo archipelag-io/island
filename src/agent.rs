@@ -262,7 +262,10 @@ impl Agent {
                         warm_workload_ids: cache_stats.warm_workload_ids,
                     });
 
-                    let perf_estimates = self.compute_performance_estimates(&capabilities);
+                    let mut perf_estimates = self.compute_performance_estimates(&capabilities);
+
+                    // Measure NATS RTT for pipeline formation scoring
+                    perf_estimates.nats_rtt_ms = self.nats.measure_rtt().await;
 
                     if let Err(e) = self.nats.send_enhanced_heartbeat(
                         active, system_snapshot, gpu_metrics, None, cache_snapshot, Some(perf_estimates)
@@ -541,6 +544,7 @@ impl Agent {
             max_concurrent_containers: Some(max_containers),
             wasm_memory_limit_mb: Some(wasm_mem),
             supported_runtimes: runtimes,
+            nats_rtt_ms: None, // Populated during heartbeat
         };
 
         debug!(

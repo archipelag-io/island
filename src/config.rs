@@ -87,6 +87,11 @@ pub struct ModelCacheConfig {
     /// Cache directory (default: ~/.island/model-cache)
     #[serde(default)]
     pub cache_dir: Option<String>,
+
+    /// HuggingFace API token for gated models (optional).
+    /// Set via config or HF_TOKEN environment variable.
+    #[serde(default)]
+    pub hf_token: Option<String>,
 }
 
 fn default_max_model_cache_gb() -> u64 {
@@ -98,6 +103,7 @@ impl Default for ModelCacheConfig {
         Self {
             max_cache_gb: default_max_model_cache_gb(),
             cache_dir: None,
+            hf_token: None,
         }
     }
 }
