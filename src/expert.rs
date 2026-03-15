@@ -230,6 +230,9 @@ async fn execute_router(
     let job_id = &job.job_id;
     let group_id = &config.group_id;
 
+    // Wrap gate in Arc<RwLock> for dynamic refresh during token generation
+    let gate = Arc::new(tokio::sync::RwLock::new(gate));
+
     let context_size = job.model_context_size.unwrap_or(2048);
     let temperature = job.model_temperature.unwrap_or(0.7);
     let max_tokens = job.input.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1024) as usize;
@@ -248,6 +251,38 @@ async fn execute_router(
                             if ctrl.get("action").and_then(|a| a.as_str()) == Some("stop") {
                                 nats.publish_status(job_id, "cancelled", None).await?;
                                 return Ok(());
+                            }
+                            // Dynamic gating refresh: re-extract weights from model
+                            if ctrl.get("action").and_then(|a| a.as_str()) == Some("refresh_gating") {
+                                let model_url = config.shard_spec.get("router_url")
+                                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let gate_clone = gate.clone();
+                                let total = config.total_experts;
+                                let active = config.active_experts;
+                                tokio::spawn(async move {
+                                    if let Ok(Ok(gating_data)) = tokio::task::spawn_blocking(move || {
+                                        crate::gguf_format::extract_all_gating_weights(
+                                            std::path::Path::new(&model_url)
+                                        )
+                                    }).await {
+                                        if !gating_data.is_empty() {
+                                            let mut new_gate = crate::gating::ExpertGate::new(
+                                                crate::gating::GatingStrategy::Hash, total, active,
+                                            );
+                                            let mut per_layer = HashMap::new();
+                                            for gwd in gating_data {
+                                                per_layer.insert(gwd.layer_id, crate::gating::NativeGatingWeights {
+                                                    weights: gwd.to_f32_matrix(),
+                                                    bias: None,
+                                                    input_mode: crate::gating::GatingInputMode::EmbeddingDot,
+                                                });
+                                            }
+                                            new_gate.set_per_layer_weights(per_layer);
+                                            *gate_clone.write().await = Some(new_gate);
+                                            tracing::info!("Gating weights refreshed dynamically");
+                                        }
+                                    }
+                                });
                             }
                         }
                     }
@@ -326,11 +361,14 @@ async fn execute_router(
         seq += 1;
 
         // Gate: select which experts should process this token
-        let selected_experts = if let Some(ref g) = gate {
-            let decision = g.route(&token, None);
-            decision.expert_ids
-        } else {
-            hash_gate_select(&token, config.total_experts, config.active_experts)
+        let selected_experts = {
+            let gate_guard = gate.read().await;
+            if let Some(ref g) = *gate_guard {
+                let decision = g.route(&token, None);
+                decision.expert_ids
+            } else {
+                hash_gate_select(&token, config.total_experts, config.active_experts)
+            }
         };
 
         // Dispatch to selected experts (batched)
