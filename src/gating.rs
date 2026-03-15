@@ -74,8 +74,11 @@ pub struct ExpertGate {
     active_experts: u32,
     /// Expert centroids for embedding-based routing (expert_id → centroid vector)
     centroids: Vec<Vec<f32>>,
-    /// Native gating weights extracted from MoE model
+    /// Native gating weights extracted from MoE model (shared across layers)
     native_weights: Option<NativeGatingWeights>,
+    /// Per-layer gating weights (layer_id → weights). When set, each layer
+    /// uses its own learned gating function for expert selection.
+    per_layer_weights: std::collections::HashMap<u32, NativeGatingWeights>,
     /// Round-robin counter
     rr_counter: std::sync::atomic::AtomicU64,
 }
@@ -89,6 +92,7 @@ impl ExpertGate {
             active_experts,
             centroids: Vec::new(),
             native_weights: None,
+            per_layer_weights: std::collections::HashMap::new(),
             rr_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -103,16 +107,41 @@ impl ExpertGate {
         }
     }
 
-    /// Set native MoE gating weights extracted from the model.
+    /// Set native MoE gating weights extracted from the model (shared across all layers).
     /// When set, routing uses the learned gating function directly.
     pub fn set_native_weights(&mut self, weights: NativeGatingWeights) {
         self.native_weights = Some(weights);
     }
 
+    /// Set per-layer gating weights. Each layer gets its own learned gating function.
+    /// When routing, the layer_id parameter selects the appropriate weights.
+    pub fn set_per_layer_weights(&mut self, layer_weights: std::collections::HashMap<u32, NativeGatingWeights>) {
+        self.per_layer_weights = layer_weights;
+    }
+
+    /// Route a token using per-layer gating weights for a specific layer.
+    /// Falls back to shared native weights, then to the configured strategy.
+    pub fn route_for_layer(&self, token: &str, embedding: Option<&[f32]>, layer_id: u32) -> RoutingDecision {
+        // Try per-layer weights first
+        if let Some(layer_weights) = self.per_layer_weights.get(&layer_id) {
+            let token_id = token.bytes().next().map(|b| b as i32);
+            if let Some(decision) = self.route_with_weights(layer_weights, token_id, embedding) {
+                return decision;
+            }
+        }
+
+        // Fall back to shared route
+        self.route(token, embedding)
+    }
+
     /// Route a token using native gating weights (when available).
-    /// Computes expert selection probabilities from the learned gating function.
     fn route_native(&self, token_id: Option<i32>, embedding: Option<&[f32]>) -> Option<RoutingDecision> {
         let weights = self.native_weights.as_ref()?;
+        self.route_with_weights(weights, token_id, embedding)
+    }
+
+    /// Route a token using specific gating weights.
+    fn route_with_weights(&self, weights: &NativeGatingWeights, token_id: Option<i32>, embedding: Option<&[f32]>) -> Option<RoutingDecision> {
 
         let expert_scores: Vec<f32> = match weights.input_mode {
             GatingInputMode::TokenLookup => {

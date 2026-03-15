@@ -631,60 +631,69 @@ pub fn extract_tensor_data(
     Ok(data)
 }
 
-/// Extract gating weights from an MoE GGUF model and convert to the
-/// NativeGatingWeights format used by gating.rs.
+/// Extract gating weights from an MoE GGUF model.
 ///
-/// Reads the `blk.0.ffn_gate_inp.weight` tensor (first layer's gating network)
-/// and interprets it as a (n_experts × hidden_dim) weight matrix.
-///
+/// Reads `blk.N.ffn_gate_inp.weight` tensors and returns per-layer gating data.
 /// Returns None if the model doesn't contain gating tensors.
 pub fn extract_gating_weights(source_path: &Path) -> Result<Option<GatingWeightData>> {
+    let all = extract_all_gating_weights(source_path)?;
+    Ok(all.into_iter().next())
+}
+
+/// Extract ALL per-layer gating weights from an MoE GGUF model.
+///
+/// Returns a `GatingWeightData` for each layer that has a gating tensor,
+/// enabling per-layer expert selection with different learned weights.
+pub fn extract_all_gating_weights(source_path: &Path) -> Result<Vec<GatingWeightData>> {
     let gguf = parse_gguf(source_path)?;
 
     let gating_tensors = find_gating_tensors(&gguf);
     if gating_tensors.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    // Use the first layer's gating tensor
-    let (layer_id, tensor_idx) = gating_tensors[0];
-    let tensor = &gguf.tensors[tensor_idx];
+    let n_embd = gguf.kv_pairs.iter()
+        .find(|kv| kv.key.ends_with(".embedding_length"))
+        .and_then(|kv| {
+            if kv.value_type == 4 && kv.raw_bytes.len() >= 4 {
+                Some(u32::from_le_bytes([kv.raw_bytes[0], kv.raw_bytes[1], kv.raw_bytes[2], kv.raw_bytes[3]]))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(4096);
 
-    tracing::info!(
-        "Found MoE gating tensor: {} (layer {}, dims {:?}, dtype {})",
-        tensor.name, layer_id, tensor.dims, tensor.data_type
-    );
+    let mut results = Vec::with_capacity(gating_tensors.len());
 
-    let raw_data = extract_tensor_data(source_path, &gguf, tensor_idx)?;
+    for (layer_id, tensor_idx) in &gating_tensors {
+        let tensor = &gguf.tensors[*tensor_idx];
 
-    // Interpret dimensions: typically (n_experts, hidden_dim) for gating
-    let (n_experts, hidden_dim) = if tensor.dims.len() == 2 {
-        (tensor.dims[0] as u32, tensor.dims[1] as u32)
-    } else if tensor.dims.len() == 1 {
-        // 1D: assume n_experts, hidden_dim from model
-        let n = tensor.dims[0] as u32;
-        let n_embd = gguf.kv_pairs.iter()
-            .find(|kv| kv.key.ends_with(".embedding_length"))
-            .and_then(|kv| {
-                if kv.value_type == 4 && kv.raw_bytes.len() >= 4 {
-                    Some(u32::from_le_bytes([kv.raw_bytes[0], kv.raw_bytes[1], kv.raw_bytes[2], kv.raw_bytes[3]]))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(4096);
-        (n / n_embd, n_embd)
-    } else {
-        return Ok(None);
-    };
+        tracing::info!(
+            "Found MoE gating tensor: {} (layer {}, dims {:?}, dtype {})",
+            tensor.name, layer_id, tensor.dims, tensor.data_type
+        );
 
-    Ok(Some(GatingWeightData {
-        raw_data,
-        n_experts,
-        hidden_dim,
-        data_type: tensor.data_type,
-        layer_id,
-    }))
+        let raw_data = extract_tensor_data(source_path, &gguf, *tensor_idx)?;
+
+        let (n_experts, hidden_dim) = if tensor.dims.len() == 2 {
+            (tensor.dims[0] as u32, tensor.dims[1] as u32)
+        } else if tensor.dims.len() == 1 {
+            let n = tensor.dims[0] as u32;
+            (n / n_embd, n_embd)
+        } else {
+            continue;
+        };
+
+        results.push(GatingWeightData {
+            raw_data,
+            n_experts,
+            hidden_dim,
+            data_type: tensor.data_type,
+            layer_id: *layer_id,
+        });
+    }
+
+    Ok(results)
 }
 
 /// Raw gating weight data extracted from a GGUF file
