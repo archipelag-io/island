@@ -749,6 +749,19 @@ async fn execute_job(
         }
     }
 
+    // Check for speculative config — draft/verify jobs bypass normal dispatch
+    #[cfg(feature = "pipeline")]
+    if let Some(ref sc_value) = job.speculative_config {
+        match serde_json::from_value::<crate::speculative::SpeculativeConfig>(sc_value.clone()) {
+            Ok(spec_config) => {
+                return crate::speculative::execute_speculative_job(nats, state, &job, spec_config, cancel_rx).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse speculative_config: {}, falling back to normal dispatch", e);
+            }
+        }
+    }
+
     // Route based on runtime type
     match job.runtime_type.as_str() {
         "wasm" => execute_wasm_job(nats, state, &job, cancel_rx).await,
