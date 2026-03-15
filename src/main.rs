@@ -13,6 +13,8 @@ mod docker;
 mod executor;
 #[cfg(feature = "gguf")]
 mod gguf;
+#[cfg(feature = "pipeline")]
+mod gguf_format;
 mod messages;
 #[allow(dead_code)]
 mod metrics;
@@ -83,6 +85,11 @@ struct Args {
     #[cfg(feature = "pipeline")]
     #[arg(long, default_value = "shards")]
     output_dir: String,
+
+    /// Use layer-aware GGUF splitting (parses tensor names, produces valid sub-GGUFs)
+    #[cfg(feature = "pipeline")]
+    #[arg(long)]
+    layer_aware: bool,
 }
 
 #[tokio::main]
@@ -122,10 +129,15 @@ async fn main() -> Result<()> {
     // If split-model mode, split a GGUF file into shards and exit
     #[cfg(feature = "pipeline")]
     if let Some(model_path) = args.split_model {
-        info!("Splitting model {} into {} shards", model_path, args.shards);
         let input = std::path::Path::new(&model_path);
         let output = std::path::Path::new(&args.output_dir);
-        shard_split::split_model(input, args.shards, output)?;
+        if args.layer_aware {
+            info!("Layer-aware split: {} into {} shards", model_path, args.shards);
+            gguf_format::split_by_layers(input, args.shards, output)?;
+        } else {
+            info!("Byte-range split: {} into {} shards", model_path, args.shards);
+            shard_split::split_model(input, args.shards, output)?;
+        }
         return Ok(());
     }
 

@@ -203,6 +203,9 @@ impl Agent {
         // Subscribe to cancel requests
         let mut cancel_subscriber = self.nats.subscribe_cancel().await?;
 
+        // Subscribe to peer probe requests (for peer-to-peer RTT measurement)
+        let mut probe_subscriber = self.nats.subscribe_probes().await?;
+
         let mut consecutive_failures: u32 = 0;
 
         // GPU metrics collector
@@ -357,6 +360,15 @@ impl Agent {
                             } else {
                                 debug!("Job {} not found in active jobs (may have already completed)", cancel.job_id);
                             }
+                        }
+                    }
+                }
+
+                // Peer probe request — respond immediately for RTT measurement
+                msg = probe_subscriber.next() => {
+                    if let Some(msg) = msg {
+                        if let Some(reply) = msg.reply {
+                            let _ = self.nats.client().publish(reply, "pong".into()).await;
                         }
                     }
                 }

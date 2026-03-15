@@ -646,6 +646,11 @@ impl NatsAgent {
         &self.host_id
     }
 
+    /// Get a reference to the underlying NATS client (for probe replies etc.)
+    pub fn client(&self) -> &async_nats::Client {
+        &self.client
+    }
+
     /// Measure round-trip time to the NATS server in milliseconds.
     /// Uses a request/reply on a per-host ping subject. Returns None on timeout or error.
     pub async fn measure_rtt(&self) -> Option<f32> {
@@ -716,6 +721,40 @@ impl NatsAgent {
             .context("Failed to parse pairing response")?;
 
         Ok(pairing_response)
+    }
+
+    // ========================================================================
+    // Peer-to-peer RTT probing
+    // ========================================================================
+
+    /// Subscribe to incoming probe requests from other Islands
+    pub async fn subscribe_probes(&self) -> Result<Subscriber> {
+        let subject = format!("host.{}.probe", self.host_id);
+        self.client
+            .subscribe(subject)
+            .await
+            .context("Failed to subscribe to probes")
+    }
+
+    /// Measure round-trip time to a specific peer Island via NATS request/reply.
+    /// Returns RTT in milliseconds, or None on timeout.
+    #[allow(dead_code)]
+    pub async fn probe_peer(&self, peer_host_id: &str) -> Option<f32> {
+        let subject = format!("host.{}.probe", peer_host_id);
+        let start = std::time::Instant::now();
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.client.request(subject, "probe".into()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                let rtt = start.elapsed().as_secs_f32() * 1000.0;
+                Some(rtt)
+            }
+            _ => None,
+        }
     }
 
     // ========================================================================
