@@ -30,6 +30,9 @@ mod preload;
 mod shard_split;
 #[cfg(feature = "pipeline")]
 #[allow(dead_code)]
+mod stun;
+#[cfg(feature = "pipeline")]
+#[allow(dead_code)]
 mod transport;
 #[cfg(target_os = "linux")]
 mod oci;

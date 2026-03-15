@@ -110,6 +110,9 @@ pub struct PerformanceEstimates {
     /// Round-trip time to NATS server in milliseconds (measured via request/reply)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nats_rtt_ms: Option<f32>,
+    /// Public IP:port as discovered via STUN (for QUIC direct transport)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_addr: Option<String>,
 }
 
 /// Cache metrics snapshot for heartbeat

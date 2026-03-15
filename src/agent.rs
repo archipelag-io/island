@@ -557,6 +557,7 @@ impl Agent {
             wasm_memory_limit_mb: Some(wasm_mem),
             supported_runtimes: runtimes,
             nats_rtt_ms: None, // Populated during heartbeat
+            public_addr: None, // Populated via STUN discovery
         };
 
         debug!(
