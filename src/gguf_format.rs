@@ -589,6 +589,195 @@ fn write_string_hashed(f: &mut std::fs::File, h: &mut Sha256, s: &str) -> Result
     Ok(())
 }
 
+/// Identify MoE gating tensors in a parsed GGUF file.
+///
+/// In Mixtral-style MoE models, gating tensors have names like:
+/// - `blk.{N}.ffn_gate_inp.weight` — the gating network for layer N
+///
+/// Returns a list of (layer_id, tensor_index) pairs for gating tensors.
+pub fn find_gating_tensors(gguf: &GgufFile) -> Vec<(u32, usize)> {
+    gguf.tensors.iter()
+        .enumerate()
+        .filter(|(_, t)| t.name.contains("ffn_gate_inp"))
+        .filter_map(|(idx, t)| {
+            t.layer_id.map(|lid| (lid, idx))
+        })
+        .collect()
+}
+
+/// Extract the raw tensor data for a specific tensor from the GGUF file.
+///
+/// Reads `tensor.data_size` bytes starting at `data_offset + tensor.data_offset`.
+pub fn extract_tensor_data(
+    source_path: &Path,
+    gguf: &GgufFile,
+    tensor_idx: usize,
+) -> Result<Vec<u8>> {
+    if tensor_idx >= gguf.tensors.len() {
+        anyhow::bail!("Tensor index {} out of range ({})", tensor_idx, gguf.tensors.len());
+    }
+
+    let tensor = &gguf.tensors[tensor_idx];
+    let abs_offset = gguf.data_offset + tensor.data_offset;
+
+    let mut file = std::fs::File::open(source_path)
+        .with_context(|| format!("Failed to open GGUF: {}", source_path.display()))?;
+
+    file.seek(SeekFrom::Start(abs_offset))?;
+
+    let mut data = vec![0u8; tensor.data_size as usize];
+    file.read_exact(&mut data)?;
+
+    Ok(data)
+}
+
+/// Extract gating weights from an MoE GGUF model and convert to the
+/// NativeGatingWeights format used by gating.rs.
+///
+/// Reads the `blk.0.ffn_gate_inp.weight` tensor (first layer's gating network)
+/// and interprets it as a (n_experts × hidden_dim) weight matrix.
+///
+/// Returns None if the model doesn't contain gating tensors.
+pub fn extract_gating_weights(source_path: &Path) -> Result<Option<GatingWeightData>> {
+    let gguf = parse_gguf(source_path)?;
+
+    let gating_tensors = find_gating_tensors(&gguf);
+    if gating_tensors.is_empty() {
+        return Ok(None);
+    }
+
+    // Use the first layer's gating tensor
+    let (layer_id, tensor_idx) = gating_tensors[0];
+    let tensor = &gguf.tensors[tensor_idx];
+
+    tracing::info!(
+        "Found MoE gating tensor: {} (layer {}, dims {:?}, dtype {})",
+        tensor.name, layer_id, tensor.dims, tensor.data_type
+    );
+
+    let raw_data = extract_tensor_data(source_path, &gguf, tensor_idx)?;
+
+    // Interpret dimensions: typically (n_experts, hidden_dim) for gating
+    let (n_experts, hidden_dim) = if tensor.dims.len() == 2 {
+        (tensor.dims[0] as u32, tensor.dims[1] as u32)
+    } else if tensor.dims.len() == 1 {
+        // 1D: assume n_experts, hidden_dim from model
+        let n = tensor.dims[0] as u32;
+        let n_embd = gguf.kv_pairs.iter()
+            .find(|kv| kv.key.ends_with(".embedding_length"))
+            .and_then(|kv| {
+                if kv.value_type == 4 && kv.raw_bytes.len() >= 4 {
+                    Some(u32::from_le_bytes([kv.raw_bytes[0], kv.raw_bytes[1], kv.raw_bytes[2], kv.raw_bytes[3]]))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(4096);
+        (n / n_embd, n_embd)
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(GatingWeightData {
+        raw_data,
+        n_experts,
+        hidden_dim,
+        data_type: tensor.data_type,
+        layer_id,
+    }))
+}
+
+/// Raw gating weight data extracted from a GGUF file
+#[derive(Debug)]
+pub struct GatingWeightData {
+    /// Raw tensor bytes
+    pub raw_data: Vec<u8>,
+    /// Number of experts
+    pub n_experts: u32,
+    /// Hidden dimension
+    pub hidden_dim: u32,
+    /// Data type (0=f32, 1=f16, etc.)
+    pub data_type: u32,
+    /// Which transformer layer this gating is from
+    pub layer_id: u32,
+}
+
+impl GatingWeightData {
+    /// Convert to f32 weight matrix (n_experts rows × hidden_dim columns).
+    /// Handles f32 and f16 input formats.
+    pub fn to_f32_matrix(&self) -> Vec<Vec<f32>> {
+        let n_exp = self.n_experts as usize;
+        let h_dim = self.hidden_dim as usize;
+        let mut matrix = vec![vec![0.0f32; h_dim]; n_exp];
+
+        match self.data_type {
+            0 => {
+                // F32: 4 bytes per element
+                for e in 0..n_exp {
+                    for h in 0..h_dim {
+                        let offset = (e * h_dim + h) * 4;
+                        if offset + 4 <= self.raw_data.len() {
+                            matrix[e][h] = f32::from_le_bytes([
+                                self.raw_data[offset],
+                                self.raw_data[offset + 1],
+                                self.raw_data[offset + 2],
+                                self.raw_data[offset + 3],
+                            ]);
+                        }
+                    }
+                }
+            }
+            1 => {
+                // F16: 2 bytes per element (convert to f32)
+                for e in 0..n_exp {
+                    for h in 0..h_dim {
+                        let offset = (e * h_dim + h) * 2;
+                        if offset + 2 <= self.raw_data.len() {
+                            let half = u16::from_le_bytes([self.raw_data[offset], self.raw_data[offset + 1]]);
+                            matrix[e][h] = half_to_f32(half);
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Quantized formats: fall back to zero matrix (gating weights are
+                // typically stored in f32 or f16, not quantized)
+                tracing::warn!("Gating tensor dtype {} not supported for direct extraction", self.data_type);
+            }
+        }
+
+        matrix
+    }
+}
+
+/// Convert IEEE 754 half-precision (f16) to f32
+fn half_to_f32(half: u16) -> f32 {
+    let sign = ((half >> 15) & 1) as u32;
+    let exp = ((half >> 10) & 0x1F) as u32;
+    let mant = (half & 0x3FF) as u32;
+
+    if exp == 0 {
+        if mant == 0 {
+            f32::from_bits(sign << 31)
+        } else {
+            // Denormalized
+            let mut m = mant;
+            let mut e = 0u32;
+            while (m & 0x400) == 0 {
+                m <<= 1;
+                e += 1;
+            }
+            m &= 0x3FF;
+            f32::from_bits((sign << 31) | ((127 - 15 - e) << 23) | (m << 13))
+        }
+    } else if exp == 31 {
+        // Inf/NaN
+        f32::from_bits((sign << 31) | (0xFF << 23) | (mant << 13))
+    } else {
+        f32::from_bits((sign << 31) | ((exp + 112) << 23) | (mant << 13))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +842,64 @@ mod tests {
         // Non-layer tensors pass through
         assert_eq!(renumber_tensor_name("token_embd.weight", 16), "token_embd.weight");
         assert_eq!(renumber_tensor_name("output.weight", 16), "output.weight");
+    }
+
+    #[test]
+    fn test_find_gating_tensors() {
+        let gguf = GgufFile {
+            version: 3,
+            tensor_count: 3,
+            kv_count: 0,
+            kv_pairs: vec![],
+            tensors: vec![
+                TensorInfo { name: "blk.0.attn_q.weight".into(), n_dims: 2, dims: vec![4096, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
+                TensorInfo { name: "blk.0.ffn_gate_inp.weight".into(), n_dims: 2, dims: vec![8, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
+                TensorInfo { name: "blk.1.ffn_gate_inp.weight".into(), n_dims: 2, dims: vec![8, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(1) },
+            ],
+            data_offset: 0,
+            alignment: 32,
+        };
+
+        let gating = find_gating_tensors(&gguf);
+        assert_eq!(gating.len(), 2);
+        assert_eq!(gating[0], (0, 1)); // layer 0, tensor index 1
+        assert_eq!(gating[1], (1, 2)); // layer 1, tensor index 2
+    }
+
+    #[test]
+    fn test_half_to_f32() {
+        // 1.0 in f16 = 0x3C00
+        let one = half_to_f32(0x3C00);
+        assert!((one - 1.0).abs() < 1e-3);
+
+        // 0.0 in f16 = 0x0000
+        let zero = half_to_f32(0x0000);
+        assert_eq!(zero, 0.0);
+
+        // -1.0 in f16 = 0xBC00
+        let neg_one = half_to_f32(0xBC00);
+        assert!((neg_one - (-1.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_gating_weight_data_to_f32() {
+        // 2 experts × 2 hidden_dim, f32
+        let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0].iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+
+        let gwd = GatingWeightData {
+            raw_data: data,
+            n_experts: 2,
+            hidden_dim: 2,
+            data_type: 0, // f32
+            layer_id: 0,
+        };
+
+        let matrix = gwd.to_f32_matrix();
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0], vec![1.0, 2.0]);
+        assert_eq!(matrix[1], vec![3.0, 4.0]);
     }
 
     #[test]
