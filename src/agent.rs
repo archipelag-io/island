@@ -698,7 +698,7 @@ async fn execute_job(
     if let Some(ref pc_value) = job.pipeline_config {
         match serde_json::from_value::<crate::pipeline::PipelineConfig>(pc_value.clone()) {
             Ok(pipeline_config) => {
-                return crate::pipeline::execute_pipeline_job(nats, &job, pipeline_config, cancel_rx).await;
+                return crate::pipeline::execute_pipeline_job(nats, state, &job, pipeline_config, cancel_rx).await;
             }
             Err(e) => {
                 tracing::error!("Failed to parse pipeline_config: {}, falling back to normal dispatch", e);

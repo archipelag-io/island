@@ -160,7 +160,7 @@ pub async fn execute_gguf_job(
 }
 
 /// Extract prompt string from job input JSON
-fn extract_prompt(input: &serde_json::Value) -> Result<String> {
+pub fn extract_prompt(input: &serde_json::Value) -> Result<String> {
     // Try "prompt" field first
     if let Some(prompt) = input.get("prompt").and_then(|v| v.as_str()) {
         return Ok(prompt.to_string());

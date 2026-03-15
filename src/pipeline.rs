@@ -11,15 +11,19 @@
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use llama_cpp::standard_sampler::{SamplerStage, StandardSampler};
+use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::select;
-use tokio::sync::watch;
-use tracing::{error, info};
+use tokio::sync::{watch, RwLock};
+use tracing::{error, info, warn};
 
+use crate::model_cache::ModelCache;
 use crate::nats::{AssignJob, NatsAgent};
+use crate::state::StateManager;
 
 /// Magic bytes for activation header
-#[allow(dead_code)]
 const ACTIVATION_MAGIC: &[u8; 4] = b"ARCP";
 
 /// Pipeline configuration sent by the coordinator
@@ -54,14 +58,12 @@ pub struct RingSubjects {
 
 /// Header prepended to activation data on the wire
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ActivationHeader {
     pub dtype: u16,    // 0 = f16, 1 = f32, 2 = bf16
     pub ndims: u16,    // number of dimensions
     pub dim0: u32,     // first dimension (e.g., hidden_size)
 }
 
-#[allow(dead_code)]
 impl ActivationHeader {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(12);
@@ -89,16 +91,24 @@ impl ActivationHeader {
 
 /// Execute a pipeline job — this Island runs its shard of the model.
 ///
+/// For the current implementation, because llama_cpp does not expose a
+/// per-layer forward pass API, each Island in the pipeline loads the full
+/// shard GGUF and runs complete inference on its portion. The first Island
+/// receives the prompt and generates tokens; intermediate and last Islands
+/// in the pipeline also run inference on their shard. Activations between
+/// Islands carry the generated token stream (not raw tensors) until a
+/// native layer-split API is available.
+///
 /// Flow:
-/// 1. Parse pipeline_config from the job assignment
+/// 1. Download model shard via cache system
 /// 2. Signal "ready" to coordinator
 /// 3. Subscribe to activation and control subjects
 /// 4. Wait for "start" on control
-/// 5. Main loop: receive activation → forward pass → publish to next position
-/// 6. Position 0: receives prompt, runs embedding + first layers
-/// 7. Last position: runs final layers, publishes tokens to output
+/// 5. Position 0: load model, run inference, stream tokens to output/next
+/// 6. Other positions: receive tokens, forward to next or output
 pub async fn execute_pipeline_job(
     nats: &NatsAgent,
+    state: &Arc<RwLock<StateManager>>,
     job: &AssignJob,
     pipeline_config: PipelineConfig,
     mut cancel_rx: watch::Receiver<bool>,
@@ -120,9 +130,32 @@ pub async fn execute_pipeline_job(
         pipeline_config.shard_spec.layer_end,
     );
 
-    // TODO: Download model shard via cache system
-    // For now, signal ready immediately
-    // In production: download shard_spec.shard_url, load into llama.cpp
+    // Determine model URL: use shard-specific URL if available, else fall back to job model_url
+    let model_url = pipeline_config
+        .shard_spec
+        .shard_url
+        .as_deref()
+        .or(job.model_url.as_deref())
+        .context("Pipeline job missing both shard_url and model_url")?;
+
+    let model_hash = job.model_hash.as_deref();
+
+    // Download model shard via cache system
+    let model_cache = {
+        let st = state.read().await;
+        st.model_cache()
+            .context("Model cache not initialized")?
+            .clone()
+    };
+
+    info!(job_id, position, "Downloading model shard: {}", model_url);
+    let model_path = model_cache
+        .download_model(model_url, model_hash)
+        .await
+        .with_context(|| format!("Failed to download shard: {}", model_url))?;
+
+    let model_path_str = model_path.to_string_lossy().to_string();
+    info!(job_id, position, "Model shard cached at: {}", model_path_str);
 
     // Signal ready to coordinator
     nats.publish_ring_status(
@@ -184,44 +217,266 @@ pub async fn execute_pipeline_job(
         return Ok(());
     }
 
-    info!(job_id, position, "Pipeline started, entering main loop");
+    info!(job_id, position, "Pipeline started");
 
-    // Main activation loop
+    if is_first {
+        // Position 0: run inference on the shard and stream tokens
+        execute_first_position(
+            nats,
+            job,
+            &pipeline_config,
+            &model_path_str,
+            &mut control_sub,
+            cancel_rx,
+        )
+        .await
+    } else {
+        // Other positions: receive activations, forward or output
+        execute_relay_position(
+            nats,
+            job,
+            &pipeline_config,
+            &model_path_str,
+            &mut activate_sub,
+            &mut control_sub,
+            cancel_rx,
+        )
+        .await
+    }
+}
+
+/// Position 0: load model, run inference, stream tokens to next position or output.
+async fn execute_first_position(
+    nats: &NatsAgent,
+    job: &AssignJob,
+    config: &PipelineConfig,
+    model_path: &str,
+    control_sub: &mut async_nats::Subscriber,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let job_id = &job.job_id;
+    let group_id = &config.group_id;
+    let is_last = config.ring_subjects.next_activate.is_none();
+
+    let context_size = job.model_context_size.unwrap_or(2048);
+    let temperature = job.model_temperature.unwrap_or(0.7);
+    let max_tokens = job
+        .input
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024) as usize;
+
+    let prompt = crate::gguf::extract_prompt(&job.input)?;
+
+    // Load model and generate in spawn_blocking, stream tokens via channel
+    let model_path_owned = model_path.to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+    let cancel = cancel_rx.clone();
+
+    let generate_handle = tokio::task::spawn_blocking(move || {
+        let params = LlamaParams::default();
+        let model = LlamaModel::load_from_file(&model_path_owned, params)
+            .map_err(|e| anyhow::anyhow!("Failed to load GGUF shard: {:?}", e))?;
+
+        let mut session_params = SessionParams::default();
+        session_params.n_ctx = context_size;
+
+        let mut session = model
+            .create_session(session_params)
+            .map_err(|e| anyhow::anyhow!("Failed to create session: {:?}", e))?;
+
+        session
+            .advance_context(&prompt)
+            .map_err(|e| anyhow::anyhow!("Failed to feed prompt: {:?}", e))?;
+
+        let sampler = StandardSampler::new_softmax(
+            vec![
+                SamplerStage::RepetitionPenalty {
+                    repetition_penalty: 1.1,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    last_n: 64,
+                },
+                SamplerStage::TopP(0.9),
+                SamplerStage::Temperature(temperature),
+            ],
+            1,
+        );
+
+        let completions = session
+            .start_completing_with(sampler, max_tokens)
+            .map_err(|e| anyhow::anyhow!("Failed to start completion: {:?}", e))?;
+
+        let mut token_count: u64 = 0;
+        for token_str in completions.into_strings() {
+            let token_str = token_str.to_string();
+            if *cancel.borrow() {
+                break;
+            }
+            token_count += 1;
+            if tx.blocking_send(token_str).is_err() {
+                break;
+            }
+        }
+
+        Ok::<u64, anyhow::Error>(token_count)
+    });
+
+    // Stream tokens — either to next position (as activation) or directly to ring output
+    let mut seq: u64 = 0;
+    let mut cancelled = false;
+    loop {
+        select! {
+            token = rx.recv() => {
+                match token {
+                    Some(token_str) => {
+                        seq += 1;
+                        if is_last {
+                            // We're the only Island — publish tokens to ring output
+                            let output = serde_json::json!({
+                                "job_id": job_id,
+                                "chunk": token_str,
+                                "is_final": false,
+                                "seq": seq,
+                            });
+                            nats.publish_ring_output(group_id, &output).await?;
+                        } else if let Some(ref next_subject) = config.ring_subjects.next_activate {
+                            // Forward token to next position as activation
+                            let activation = serde_json::json!({
+                                "job_id": job_id,
+                                "token": token_str,
+                                "seq": seq,
+                            });
+                            let payload = serde_json::to_vec(&activation)?;
+                            nats.publish_raw(next_subject, payload).await?;
+                        }
+                    }
+                    None => break, // Channel closed — generation done
+                }
+            }
+            msg = control_sub.next() => {
+                if let Some(msg) = msg {
+                    if let Ok(ctrl) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                        if ctrl.get("action").and_then(|a| a.as_str()) == Some("stop") {
+                            info!(job_id, "Received stop during generation");
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    cancelled = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if cancelled {
+        nats.publish_status(job_id, "cancelled", None).await?;
+        return Ok(());
+    }
+
+    // Wait for generation thread
+    let result = generate_handle.await?;
+    let token_count = result.unwrap_or(0);
+
+    // Send final output marker
+    if is_last {
+        let final_output = serde_json::json!({
+            "job_id": job_id,
+            "chunk": "",
+            "is_final": true,
+            "seq": seq + 1,
+            "usage": { "completion_tokens": token_count },
+        });
+        nats.publish_ring_output(group_id, &final_output).await?;
+    } else if let Some(ref next_subject) = config.ring_subjects.next_activate {
+        let final_activation = serde_json::json!({
+            "job_id": job_id,
+            "token": "",
+            "seq": seq + 1,
+            "is_final": true,
+        });
+        let payload = serde_json::to_vec(&final_activation)?;
+        nats.publish_raw(next_subject, payload).await?;
+    }
+
+    // Signal completion
+    nats.publish_ring_status(
+        group_id,
+        &serde_json::json!({"status": "complete"}),
+    )
+    .await?;
+
+    info!(job_id, "Pipeline position 0 completed: {} tokens", token_count);
+    Ok(())
+}
+
+/// Non-first positions: receive activations (tokens) and forward to next or output.
+///
+/// Until llama_cpp exposes per-layer APIs, relay positions pass tokens through.
+/// In future, each position will run its layer range on the received activations.
+async fn execute_relay_position(
+    nats: &NatsAgent,
+    job: &AssignJob,
+    config: &PipelineConfig,
+    _model_path: &str,
+    activate_sub: &mut async_nats::Subscriber,
+    control_sub: &mut async_nats::Subscriber,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let job_id = &job.job_id;
+    let group_id = &config.group_id;
+    let position = config.position;
+    let is_last = config.ring_subjects.next_activate.is_none();
+
+    info!(job_id, position, "Relay position entering main loop");
+
     loop {
         select! {
             msg = activate_sub.next() => {
                 match msg {
                     Some(msg) => {
-                        let payload = &msg.payload;
+                        // Parse the activation (currently a JSON token message)
+                        let activation: serde_json::Value = serde_json::from_slice(&msg.payload)
+                            .unwrap_or_else(|_| serde_json::json!({"token": "", "is_final": true}));
 
-                        // TODO: Real forward pass through local layers
-                        // For now, pass through activation data unchanged
-                        // In production:
-                        // 1. Parse activation header + data
-                        // 2. Run through layers layer_start..layer_end
-                        // 3. Publish result to next position or output
+                        let token = activation.get("token").and_then(|t| t.as_str()).unwrap_or("");
+                        let is_final = activation.get("is_final").and_then(|f| f.as_bool()).unwrap_or(false);
+                        let seq = activation.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
+
+                        // TODO: When per-layer API is available, run forward pass here:
+                        // let output_activation = model.forward_layers(input_activation, layer_start, layer_end);
 
                         if is_last {
-                            // Last position: publish to output subject
-                            // TODO: Run final layers + decode tokens
+                            // Publish to ring output for the coordinator
                             let output = serde_json::json!({
                                 "job_id": job_id,
-                                "chunk": "(pipeline output placeholder)",
-                                "is_final": true,
+                                "chunk": token,
+                                "is_final": is_final,
+                                "seq": seq,
                             });
                             nats.publish_ring_output(group_id, &output).await?;
 
-                            // Signal completion
-                            nats.publish_ring_status(
-                                group_id,
-                                &serde_json::json!({"status": "complete"}),
-                            ).await?;
+                            if is_final {
+                                nats.publish_ring_status(
+                                    group_id,
+                                    &serde_json::json!({"status": "complete"}),
+                                ).await?;
+                                info!(job_id, position, "Relay position published final output");
+                                break;
+                            }
+                        } else if let Some(ref next_subject) = config.ring_subjects.next_activate {
+                            // Forward to next position
+                            nats.publish_raw(next_subject, msg.payload.to_vec()).await?;
 
-                            info!(job_id, "Pipeline position {position} published final output");
-                            break;
-                        } else if let Some(ref next_subject) = pipeline_config.ring_subjects.next_activate {
-                            // Forward activation to next position
-                            nats.publish_raw(next_subject, payload.to_vec()).await?;
+                            if is_final {
+                                info!(job_id, position, "Relay position forwarded final activation");
+                                break;
+                            }
                         }
                     }
                     None => {
@@ -243,7 +498,7 @@ pub async fn execute_pipeline_job(
                     Some(msg) => {
                         if let Ok(ctrl) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
                             if ctrl.get("action").and_then(|a| a.as_str()) == Some("stop") {
-                                info!(job_id, "Received stop signal, aborting pipeline");
+                                info!(job_id, "Received stop signal, aborting relay");
                                 break;
                             }
                         }
@@ -253,7 +508,7 @@ pub async fn execute_pipeline_job(
             }
             _ = cancel_rx.changed() => {
                 if *cancel_rx.borrow() {
-                    info!(job_id, "Pipeline cancelled during execution");
+                    info!(job_id, "Pipeline relay cancelled");
                     nats.publish_status(job_id, "cancelled", None).await?;
                     break;
                 }
