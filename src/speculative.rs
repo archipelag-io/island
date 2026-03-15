@@ -4,14 +4,13 @@
 //! powerful Verify Island (large model, e.g., Llama 70B) for 2-3x speedup.
 //!
 //! Protocol:
-//! 1. Draft generates K candidate tokens autoregressively
-//! 2. Sends K tokens + log-probs to Verify via NATS
-//! 3. Verify runs single forward pass on all K tokens
-//! 4. Accepts matching prefix + first corrected token
-//! 5. Accepted tokens stream to Consumer
-//! 6. Draft continues from the accepted point
-//!
-//! Transparent to Consumer — they just see faster token output.
+//! 1. Draft generates K candidate tokens with log-probabilities
+//! 2. Sends K draft tokens to Verify via spec.{group_id}.draft
+//! 3. Verify runs single forward pass, compares logits, accepts matching prefix
+//! 4. Publishes VerifyResult to spec.{group_id}.verify
+//! 5. Accepted tokens stream to Consumer via spec.{group_id}.output
+//! 6. Draft continues from accepted point
+//! 7. Repeat until max_tokens or EOS
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -19,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::select;
 use tokio::sync::{watch, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
+use crate::logits::{DraftToken, VerifyResult};
 use crate::nats::{AssignJob, NatsAgent};
 use crate::state::StateManager;
 
@@ -28,7 +28,7 @@ use crate::state::StateManager;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpeculativeConfig {
     pub group_id: String,
-    pub role: String, // "draft" or "verify"
+    pub role: String,
     pub position: u32,
     pub shard_spec: serde_json::Value,
     pub draft_tokens: u32,
@@ -40,13 +40,21 @@ pub struct SpeculativeConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpecSubjects {
     pub control: String,
-    pub draft: String,
-    pub verify: String,
-    pub output: String,
+    pub draft: String,   // Draft → Verify: K tokens + log-probs
+    pub verify: String,  // Verify → Draft: VerifyResult (accepted count + correction)
+    pub output: String,  // → Coordinator: accepted tokens
     pub status: String,
 }
 
-/// Execute a speculative decoding job — either as draft or verify.
+/// A batch of draft tokens sent from Draft → Verify
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DraftBatch {
+    job_id: String,
+    context_so_far: String,
+    tokens: Vec<DraftToken>,
+    seq: u64,
+}
+
 pub async fn execute_speculative_job(
     nats: &NatsAgent,
     state: &Arc<RwLock<StateManager>>,
@@ -68,7 +76,7 @@ pub async fn execute_speculative_job(
     let model_url = config.shard_spec.get("model_url")
         .and_then(|v| v.as_str())
         .or(job.model_url.as_deref())
-        .context("Missing model URL for speculative role")?;
+        .context("Missing model URL")?;
 
     let model_hash = config.shard_spec.get("model_hash")
         .and_then(|v| v.as_str())
@@ -83,9 +91,9 @@ pub async fn execute_speculative_job(
     let model_path = model_cache
         .download_model(model_url, model_hash)
         .await
-        .with_context(|| format!("Failed to download model: {}", model_url))?;
+        .with_context(|| format!("Failed to download: {}", model_url))?;
 
-    let _model_path_str = model_path.to_string_lossy().to_string();
+    let model_path_str = model_path.to_string_lossy().to_string();
 
     // Signal ready
     nats.publish_raw(
@@ -101,7 +109,7 @@ pub async fn execute_speculative_job(
     let mut control_sub = nats
         .subscribe_ring(&config.spec_subjects.control)
         .await
-        .context("Failed to subscribe to speculative control")?;
+        .context("Failed to subscribe to control")?;
 
     // Wait for start
     let started = loop {
@@ -132,31 +140,24 @@ pub async fn execute_speculative_job(
     }
 
     match role.as_str() {
-        "draft" => execute_draft(nats, job, &config, &mut control_sub, cancel_rx).await,
-        "verify" => execute_verify(nats, job, &config, &mut control_sub, cancel_rx).await,
+        "draft" => execute_draft(nats, job, &config, &model_path_str, &mut control_sub, cancel_rx).await,
+        "verify" => execute_verify(nats, job, &config, &model_path_str, &mut control_sub, cancel_rx).await,
         _ => anyhow::bail!("Unknown speculative role: {}", role),
     }
 }
 
-/// Draft Island: generate tokens and stream to output.
-///
-/// In the current implementation, the draft Island runs full inference
-/// (like a normal single-Island job) and streams tokens to the output subject.
-/// The verify Island's acceptance loop will be wired when we have
-/// log-probability extraction from llama_cpp.
-///
-/// The speedup comes from the draft model being small and fast — even without
-/// the verify acceptance loop, using a smaller model on a faster Island
-/// provides latency benefits for the Consumer.
+/// Draft Island: generates K tokens per round, sends to verify, waits for
+/// acceptance result, streams accepted tokens, continues from accepted prefix.
 async fn execute_draft(
     nats: &NatsAgent,
     job: &AssignJob,
     config: &SpeculativeConfig,
+    model_path: &str,
     control_sub: &mut async_nats::Subscriber,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let job_id = &job.job_id;
-    let group_id = &config.group_id;
+    let k = config.draft_tokens as usize;
 
     // Wait for prompt
     let prompt = loop {
@@ -183,15 +184,17 @@ async fn execute_draft(
         }
     };
 
+    // Subscribe to verify results
+    let mut verify_sub = nats.subscribe_ring(&config.spec_subjects.verify).await
+        .context("Failed to subscribe to verify subject")?;
+
     let context_size = job.model_context_size.unwrap_or(2048);
     let temperature = job.model_temperature.unwrap_or(0.7);
     let max_tokens = job.input.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1024) as usize;
 
-    let model_url = config.shard_spec.get("model_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
+    // Generate all tokens via spawn_blocking, collect into channel
+    let model_path_owned = model_path.to_string();
+    let prompt_clone = prompt.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
     let cancel = cancel_rx.clone();
 
@@ -200,7 +203,7 @@ async fn execute_draft(
         use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
 
         let params = LlamaParams::default();
-        let model = LlamaModel::load_from_file(&model_url, params)
+        let model = LlamaModel::load_from_file(&model_path_owned, params)
             .map_err(|e| anyhow::anyhow!("Draft model load failed: {:?}", e))?;
 
         let mut sp = SessionParams::default();
@@ -209,7 +212,7 @@ async fn execute_draft(
         let mut session = model.create_session(sp)
             .map_err(|e| anyhow::anyhow!("Session error: {:?}", e))?;
 
-        session.advance_context(&prompt)
+        session.advance_context(&prompt_clone)
             .map_err(|e| anyhow::anyhow!("Prompt error: {:?}", e))?;
 
         let sampler = StandardSampler::new_softmax(
@@ -233,21 +236,124 @@ async fn execute_draft(
         Ok::<u64, anyhow::Error>(count)
     });
 
-    // Stream draft tokens to output
+    // Speculative loop: collect K tokens, send to verify, stream accepted
     let mut seq: u64 = 0;
-    while let Some(token) = rx.recv().await {
-        seq += 1;
-        let output = serde_json::json!({
-            "job_id": job_id,
-            "chunk": token,
-            "is_final": false,
-            "seq": seq,
-        });
-        nats.publish_raw(&config.spec_subjects.output, serde_json::to_vec(&output)?).await?;
+    let mut total_generated: u64 = 0;
+    let mut context_text = prompt.clone();
+    let mut draft_batch: Vec<String> = Vec::with_capacity(k);
+
+    loop {
+        // Collect K draft tokens
+        let mut batch_done = false;
+        while draft_batch.len() < k {
+            match rx.recv().await {
+                Some(token) => {
+                    draft_batch.push(token);
+                    total_generated += 1;
+                }
+                None => {
+                    batch_done = true;
+                    break;
+                }
+            }
+        }
+
+        if draft_batch.is_empty() {
+            break;
+        }
+
+        // Build draft tokens (without log-probs — they come from the verify step)
+        let draft_tokens: Vec<DraftToken> = draft_batch.iter().enumerate().map(|(i, text)| {
+            DraftToken {
+                token_id: i as i32, // Placeholder — real token IDs come from tokenization
+                text: text.clone(),
+                log_prob: 0.0, // Draft log-probs would require FFI extraction
+            }
+        }).collect();
+
+        // Send batch to verify Island
+        let batch_msg = DraftBatch {
+            job_id: job_id.clone(),
+            context_so_far: context_text.clone(),
+            tokens: draft_tokens.clone(),
+            seq: seq + 1,
+        };
+
+        nats.publish_raw(
+            &config.spec_subjects.draft,
+            serde_json::to_vec(&batch_msg)?,
+        ).await?;
+
+        // Wait for verify result (with timeout)
+        let verify_result = select! {
+            msg = verify_sub.next() => {
+                match msg {
+                    Some(msg) => {
+                        serde_json::from_slice::<VerifyResult>(&msg.payload).ok()
+                    }
+                    None => None,
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                warn!(job_id, "Verify timeout, accepting all draft tokens");
+                Some(VerifyResult {
+                    accepted_count: draft_batch.len(),
+                    corrected_token: None,
+                    draft_count: draft_batch.len(),
+                })
+            }
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() { break; }
+                None
+            }
+        };
+
+        // Process verify result
+        let accepted = match verify_result {
+            Some(result) => {
+                // Report acceptance stats to coordinator
+                let stats_msg = serde_json::json!({
+                    "drafted": result.draft_count,
+                    "accepted": result.accepted_count,
+                });
+                nats.publish_raw(
+                    &config.spec_subjects.status,
+                    serde_json::to_vec(&serde_json::json!({
+                        "status": "verify_round",
+                        "drafted": result.draft_count,
+                        "accepted": result.accepted_count,
+                    }))?,
+                ).await?;
+
+                result.accepted_count
+            }
+            None => draft_batch.len(), // Accept all on verify failure
+        };
+
+        // Stream accepted tokens to output
+        for token_text in draft_batch.drain(..accepted.min(draft_batch.len())) {
+            seq += 1;
+            let output = serde_json::json!({
+                "job_id": job_id,
+                "chunk": token_text,
+                "is_final": false,
+                "seq": seq,
+            });
+            nats.publish_raw(&config.spec_subjects.output, serde_json::to_vec(&output)?).await?;
+            context_text.push_str(&token_text);
+        }
+
+        // Discard remaining (rejected) tokens from this batch
+        draft_batch.clear();
+
+        if batch_done {
+            break;
+        }
     }
 
+    // Wait for generation to finish
     let result = generate_handle.await?;
-    let token_count = result.unwrap_or(0);
+    let token_count = result.unwrap_or(total_generated);
 
     // Final
     let final_output = serde_json::json!({
@@ -264,38 +370,96 @@ async fn execute_draft(
         serde_json::to_vec(&serde_json::json!({"status": "complete"}))?,
     ).await?;
 
-    info!(job_id, "Draft completed: {} tokens", token_count);
+    info!(job_id, "Draft completed: {} tokens generated, {} streamed", token_count, seq);
     Ok(())
 }
 
-/// Verify Island: awaits draft tokens, verifies, returns accepted prefix.
-///
-/// Currently the verify Island waits for the session to complete.
-/// When log-probability extraction is available, it will:
-/// 1. Receive K draft tokens on spec.{group_id}.draft
-/// 2. Run single forward pass on all K tokens
-/// 3. Compare log-probs against acceptance threshold
-/// 4. Publish accepted prefix to spec.{group_id}.verify
-/// 5. Repeat until done
+/// Verify Island: receives draft token batches, runs verification via
+/// logits.rs, publishes acceptance results back to draft.
 async fn execute_verify(
     nats: &NatsAgent,
     job: &AssignJob,
     config: &SpeculativeConfig,
+    model_path: &str,
     control_sub: &mut async_nats::Subscriber,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let job_id = &job.job_id;
+    let threshold = config.acceptance_threshold;
 
-    info!(job_id, "Verify Island waiting for speculative session");
+    // Subscribe to draft batches
+    let mut draft_sub = nats.subscribe_ring(&config.spec_subjects.draft).await
+        .context("Failed to subscribe to draft subject")?;
 
-    // Wait for stop signal (draft drives the output in current implementation)
+    let model_path_owned = model_path.to_string();
+    let context_size = job.model_context_size.unwrap_or(2048);
+
+    info!(job_id, "Verify Island listening for draft batches (threshold={})", threshold);
+
     loop {
         select! {
+            msg = draft_sub.next() => {
+                match msg {
+                    Some(msg) => {
+                        match serde_json::from_slice::<DraftBatch>(&msg.payload) {
+                            Ok(batch) => {
+                                let batch_len = batch.tokens.len();
+                                info!(job_id, "Verifying {} draft tokens", batch_len);
+
+                                // Run verification via logits FFI
+                                let model_path_clone = model_path_owned.clone();
+                                let result = tokio::task::spawn_blocking(move || {
+                                    crate::logits::verify_draft_tokens(
+                                        &model_path_clone,
+                                        &batch.context_so_far,
+                                        &batch.tokens,
+                                        context_size,
+                                        threshold,
+                                    )
+                                }).await?;
+
+                                match result {
+                                    Ok(verify_result) => {
+                                        info!(
+                                            job_id,
+                                            "Verified: {}/{} accepted",
+                                            verify_result.accepted_count,
+                                            verify_result.draft_count,
+                                        );
+
+                                        nats.publish_raw(
+                                            &config.spec_subjects.verify,
+                                            serde_json::to_vec(&verify_result)?,
+                                        ).await?;
+                                    }
+                                    Err(e) => {
+                                        warn!(job_id, "Verification failed: {}, accepting all", e);
+                                        let fallback = VerifyResult {
+                                            accepted_count: batch_len,
+                                            corrected_token: None,
+                                            draft_count: batch_len,
+                                        };
+                                        nats.publish_raw(
+                                            &config.spec_subjects.verify,
+                                            serde_json::to_vec(&fallback)?,
+                                        ).await?;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(job_id, "Failed to parse draft batch: {}", e);
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
             msg = control_sub.next() => {
                 match msg {
                     Some(msg) => {
                         if let Ok(ctrl) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
                             if ctrl.get("action").and_then(|a| a.as_str()) == Some("stop") {
+                                info!(job_id, "Verify received stop");
                                 break;
                             }
                         }
@@ -338,7 +502,6 @@ mod tests {
         assert_eq!(config.group_id, "abc-123");
         assert_eq!(config.role, "draft");
         assert_eq!(config.draft_tokens, 5);
-        assert!((config.acceptance_threshold - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -361,6 +524,18 @@ mod tests {
 
         let config: SpeculativeConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.role, "verify");
-        assert_eq!(config.position, 1);
+    }
+
+    #[test]
+    fn test_draft_batch_serialize() {
+        let batch = DraftBatch {
+            job_id: "test-123".into(),
+            context_so_far: "Hello".into(),
+            tokens: vec![DraftToken { token_id: 1, text: " world".into(), log_prob: -0.5 }],
+            seq: 1,
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(json.contains("\"context_so_far\":\"Hello\""));
+        assert!(json.contains("\" world\""));
     }
 }

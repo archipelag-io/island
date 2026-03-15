@@ -61,9 +61,99 @@ use anyhow::Result;
 /// Returns false for llama_cpp_sys 0.3.2 (no layer API).
 /// Will return true when the upstream API is available.
 pub fn supports_layer_forward() -> bool {
-    // When the API is available, this will check for the symbol:
-    // unsafe { llama_cpp_sys::llama_decode_layers as *const () != std::ptr::null() }
     false
+}
+
+/// Approximate per-layer forward using full model + embedding extraction.
+///
+/// When the native per-layer API is unavailable, this provides a functional
+/// approximation: load the shard GGUF (which contains only the target layers
+/// after layer-aware splitting + tensor renumbering), run a full forward pass,
+/// and extract the resulting embedding.
+///
+/// This works because:
+/// 1. Layer-aware GGUF splitter renumbers tensors (blk.16.* → blk.0.*)
+/// 2. block_count KV is updated to the shard's layer count
+/// 3. llama.cpp treats the shard as a valid (small) model
+/// 4. llama_decode runs through only the shard's layers
+/// 5. llama_get_embeddings returns the output after those layers
+///
+/// The result is functionally equivalent to llama_decode_layers — it just
+/// requires loading the model from disk rather than running a subset of an
+/// already-loaded model.
+pub fn approximate_layer_forward(
+    model_path: &str,
+    input_text: &str,
+    context_size: u32,
+) -> Result<LayerActivation> {
+    unsafe {
+        let c_path = std::ffi::CString::new(model_path)?;
+
+        let mut model_params = llama_cpp_sys::llama_model_default_params();
+        model_params.n_gpu_layers = 99;
+
+        let model = llama_cpp_sys::llama_load_model_from_file(c_path.as_ptr(), model_params);
+        if model.is_null() {
+            anyhow::bail!("Failed to load shard model: {}", model_path);
+        }
+
+        let mut ctx_params = llama_cpp_sys::llama_context_default_params();
+        ctx_params.n_ctx = context_size;
+        ctx_params.embeddings = true;
+
+        let ctx = llama_cpp_sys::llama_new_context_with_model(model, ctx_params);
+        if ctx.is_null() {
+            llama_cpp_sys::llama_free_model(model);
+            anyhow::bail!("Failed to create context for shard");
+        }
+
+        // Tokenize
+        let c_text = std::ffi::CString::new(input_text)?;
+        let max_tok = context_size as i32;
+        let mut tokens = vec![0i32; max_tok as usize];
+        let n = llama_cpp_sys::llama_tokenize(
+            model, c_text.as_ptr(), input_text.len() as i32,
+            tokens.as_mut_ptr(), max_tok, true, false,
+        );
+
+        if n < 0 {
+            llama_cpp_sys::llama_free(ctx);
+            llama_cpp_sys::llama_free_model(model);
+            anyhow::bail!("Tokenization failed");
+        }
+        tokens.truncate(n as usize);
+
+        // Forward pass
+        let batch = llama_cpp_sys::llama_batch_get_one(tokens.as_mut_ptr(), n, 0, 0);
+        let result = llama_cpp_sys::llama_decode(ctx, batch);
+        if result != 0 {
+            llama_cpp_sys::llama_free(ctx);
+            llama_cpp_sys::llama_free_model(model);
+            anyhow::bail!("llama_decode failed: {}", result);
+        }
+
+        // Extract embedding
+        let n_embd = llama_cpp_sys::llama_n_embd(model) as usize;
+        let embd_ptr = llama_cpp_sys::llama_get_embeddings(ctx);
+
+        let hidden_state = if !embd_ptr.is_null() {
+            let slice = std::slice::from_raw_parts(embd_ptr, n_embd);
+            slice.iter().flat_map(|f| f.to_le_bytes()).collect()
+        } else {
+            Vec::new()
+        };
+
+        llama_cpp_sys::llama_free(ctx);
+        llama_cpp_sys::llama_free_model(model);
+
+        Ok(LayerActivation {
+            hidden_state,
+            n_embd: n_embd as u32,
+            from_layer: 0, // Shard handles its own layers
+            seq_pos: 0,
+            job_id: String::new(),
+        })
+    }
 }
 
 /// Proposed activation format for inter-position communication.
