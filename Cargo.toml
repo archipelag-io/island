@@ -12,10 +12,11 @@ path = "src/main.rs"
 
 [features]
 default = []
+pipeline = []
 onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:image", "dep:base64"]
 gguf = ["dep:llama_cpp"]
 diffusers = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers", "dep:image", "dep:base64", "dep:hf-hub"]
-all-runtimes = ["onnx", "gguf", "diffusers"]
+all-runtimes = ["onnx", "gguf", "diffusers", "pipeline"]
 
 [dependencies]
 # Async runtime

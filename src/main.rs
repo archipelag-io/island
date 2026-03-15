@@ -18,6 +18,8 @@ mod messages;
 mod metrics;
 mod model_cache;
 mod nats;
+#[cfg(feature = "pipeline")]
+mod pipeline;
 mod preload;
 #[cfg(target_os = "linux")]
 mod oci;

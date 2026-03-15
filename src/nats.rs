@@ -198,6 +198,9 @@ pub struct AssignJob {
     /// Sandbox tier for trust-level-based resource limits
     /// Values: "restricted", "standard", "elevated"
     pub sandbox_tier: Option<String>,
+    /// Pipeline configuration (present when this is a pipeline shard job)
+    #[serde(default)]
+    pub pipeline_config: Option<serde_json::Value>,
 }
 
 fn default_runtime_type() -> String {
@@ -680,6 +683,57 @@ impl NatsAgent {
             .context("Failed to parse pairing response")?;
 
         Ok(pairing_response)
+    }
+
+    // ========================================================================
+    // Pipeline ring methods
+    // ========================================================================
+
+    /// Subscribe to a ring subject (activation or control)
+    pub async fn subscribe_ring(&self, subject: &str) -> Result<Subscriber> {
+        self.client
+            .subscribe(subject.to_string())
+            .await
+            .context(format!("Failed to subscribe to ring subject: {}", subject))
+    }
+
+    /// Publish a status message on the ring status subject
+    pub async fn publish_ring_status(
+        &self,
+        group_id: &str,
+        msg: &serde_json::Value,
+    ) -> Result<()> {
+        let subject = format!("ring.{}.status", group_id);
+        let payload = serde_json::to_vec(msg).context("Failed to serialize ring status")?;
+        self.client
+            .publish(subject, payload.into())
+            .await
+            .context("Failed to publish ring status")?;
+        Ok(())
+    }
+
+    /// Publish output from the last position in a ring
+    pub async fn publish_ring_output(
+        &self,
+        group_id: &str,
+        msg: &serde_json::Value,
+    ) -> Result<()> {
+        let subject = format!("ring.{}.output", group_id);
+        let payload = serde_json::to_vec(msg).context("Failed to serialize ring output")?;
+        self.client
+            .publish(subject, payload.into())
+            .await
+            .context("Failed to publish ring output")?;
+        Ok(())
+    }
+
+    /// Publish raw bytes to a subject (for activation forwarding)
+    pub async fn publish_raw(&self, subject: &str, data: Vec<u8>) -> Result<()> {
+        self.client
+            .publish(subject.to_string(), data.into())
+            .await
+            .context("Failed to publish raw data")?;
+        Ok(())
     }
 }
 
