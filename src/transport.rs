@@ -24,14 +24,30 @@ use crate::nats::NatsAgent;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportMode {
-    /// NATS pub/sub (default, always available)
+    /// NATS pub/sub (default, always available).
+    /// Acts as the TURN-equivalent relay for symmetric NAT environments.
     Nats,
     /// Direct QUIC connection between Islands
     Quic,
     /// QUIC with NATS relay fallback — tries QUIC first, falls back to NATS
     /// if direct connection fails (NAT, firewall, symmetric NAT).
     /// This is the recommended mode for production pipelines.
+    /// The NATS fallback serves as a built-in TURN relay without requiring
+    /// external relay infrastructure.
     QuicWithRelay,
+}
+
+/// Transport statistics for monitoring relay usage
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TransportStats {
+    /// Number of messages sent via NATS (relay)
+    pub nats_messages: u64,
+    /// Number of messages sent via QUIC (direct)
+    pub quic_messages: u64,
+    /// Whether QUIC connection was attempted and failed (relay mode active)
+    pub relay_active: bool,
+    /// Reason for relay fallback (if any)
+    pub relay_reason: Option<String>,
 }
 
 impl Default for TransportMode {

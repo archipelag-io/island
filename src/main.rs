@@ -26,6 +26,11 @@ mod nats;
 #[allow(dead_code)]
 mod layer_executor;
 #[cfg(feature = "pipeline")]
+#[allow(dead_code)]
+mod layer_forward;
+#[cfg(feature = "pipeline")]
+mod logits;
+#[cfg(feature = "pipeline")]
 mod pipeline;
 mod preload;
 #[cfg(feature = "pipeline")]
