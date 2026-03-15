@@ -1,0 +1,88 @@
+--- llama_decode_layers: Upstream Contribution Proposal ---
+
+This patch adds per-layer forward pass support to llama.cpp,
+enabling pipeline parallelism where each node runs a subset of layers.
+
+Proposed additions to llama.h:
+
+    // Run forward pass through layers [layer_start, layer_end) only.
+    // The hidden state from the previous layer range must be set via
+    // llama_set_hidden_state() before calling this.
+    //
+    // After this call:
+    // - llama_get_hidden_state() returns the output of layer (layer_end - 1)
+    // - If layer_end == n_layer, llama_get_logits() is also valid
+    //
+    // Returns 0 on success, negative on error.
+    LLAMA_API int32_t llama_decode_layers(
+        struct llama_context * ctx,
+        struct llama_batch     batch,
+        int32_t                layer_start,  // inclusive
+        int32_t                layer_end     // exclusive
+    );
+
+    // Get the hidden state after the last decoded layer.
+    // Returns pointer to n_embd floats. NULL if no decode has been run.
+    LLAMA_API float * llama_get_hidden_state(struct llama_context * ctx);
+
+    // Set the hidden state as input for the next decode call.
+    // This replaces the normal token embedding lookup for the first layer.
+    // n_tokens must match the batch size of the next llama_decode_layers() call.
+    LLAMA_API int32_t llama_set_hidden_state(
+        struct llama_context * ctx,
+        const float          * data,     // n_tokens * n_embd floats
+        int32_t                n_tokens,
+        int32_t                n_embd
+    );
+
+Implementation sketch for llama.cpp:
+
+    int32_t llama_decode_layers(
+        struct llama_context * ctx,
+        struct llama_batch batch,
+        int32_t layer_start,
+        int32_t layer_end
+    ) {
+        // Validate layer range
+        const int n_layer = llama_n_layer(llama_get_model(ctx));
+        if (layer_start < 0 || layer_end > n_layer || layer_start >= layer_end) {
+            return -1;
+        }
+
+        // Use existing llama_decode_internal but skip layers outside range:
+        // In ggml_build_llama():
+        //   for (int il = layer_start; il < layer_end; ++il) {
+        //       // ... same layer computation as current code ...
+        //   }
+        //
+        // If layer_start > 0, use ctx->hidden_state as input instead of
+        // the token embedding lookup.
+        //
+        // If layer_end < n_layer, skip the output norm + logits computation
+        // and store the hidden state for llama_get_hidden_state().
+
+        return llama_decode_internal(*ctx, batch, layer_start, layer_end);
+    }
+
+    float * llama_get_hidden_state(struct llama_context * ctx) {
+        return ctx->hidden_state;  // New field: float * hidden_state
+    }
+
+    int32_t llama_set_hidden_state(
+        struct llama_context * ctx,
+        const float * data,
+        int32_t n_tokens,
+        int32_t n_embd
+    ) {
+        // Allocate/resize hidden_state buffer if needed
+        const size_t size = n_tokens * n_embd * sizeof(float);
+        ctx->hidden_state = realloc(ctx->hidden_state, size);
+        memcpy(ctx->hidden_state, data, size);
+        ctx->hidden_state_n_tokens = n_tokens;
+        ctx->hidden_state_n_embd = n_embd;
+        return 0;
+    }
+
+Status: PROPOSAL — not yet submitted upstream.
+When submitted, reference this file for the motivation and use case.
+See also: node-agent/src/layer_forward.rs for the Rust integration code.

@@ -249,9 +249,46 @@ async fn execute_router(
         Ok::<u64, anyhow::Error>(count)
     });
 
+    // Batched expert dispatch + output streaming
+    let expert_batch_size = 4; // Tokens per expert dispatch batch
+    let mut batcher = ExpertBatcher::new(expert_batch_size);
     let mut seq: u64 = 0;
+    let mut dispatched: u64 = 0;
+
     while let Some(token) = rx.recv().await {
         seq += 1;
+
+        // Gate: select which experts should process this token
+        let selected_experts = hash_gate_select(
+            &token,
+            config.total_experts,
+            config.active_experts,
+        );
+
+        // Dispatch to selected experts (batched)
+        for expert_id in &selected_experts {
+            let eid_str = expert_id.to_string();
+            if let Some(subject) = config.expert_subjects.dispatch.get(&eid_str) {
+                let token_msg = serde_json::json!({
+                    "job_id": job_id,
+                    "token": &token,
+                    "expert_id": expert_id,
+                    "seq": seq,
+                });
+
+                if let Some((subj, batch)) = batcher.add(subject, token_msg) {
+                    let batch_payload = serde_json::json!({
+                        "job_id": job_id,
+                        "tokens": batch,
+                        "seq": seq,
+                    });
+                    nats.publish_raw(&subj, serde_json::to_vec(&batch_payload)?).await?;
+                    dispatched += batch.len() as u64;
+                }
+            }
+        }
+
+        // Also stream to output (router produces tokens directly)
         let output = serde_json::json!({
             "job_id": job_id,
             "chunk": token,
@@ -262,6 +299,17 @@ async fn execute_router(
             &config.expert_subjects.output,
             serde_json::to_vec(&output)?,
         ).await?;
+    }
+
+    // Flush remaining expert batches
+    for (subj, batch) in batcher.flush_all() {
+        let batch_payload = serde_json::json!({
+            "job_id": job_id,
+            "tokens": batch,
+            "seq": seq,
+        });
+        nats.publish_raw(&subj, serde_json::to_vec(&batch_payload)?).await?;
+        dispatched += batch.len() as u64;
     }
 
     let result = generate_handle.await?;
@@ -286,13 +334,86 @@ async fn execute_router(
         serde_json::to_vec(&serde_json::json!({"status": "complete"}))?,
     ).await?;
 
-    info!(job_id, "Router completed: {} tokens", token_count);
+    info!(job_id, "Router completed: {} tokens ({} dispatched to experts)", token_count, dispatched);
     Ok(())
 }
 
+/// Route a token to the appropriate expert using hash-based gating.
+///
+/// In a true MoE model, the gating network outputs expert selection weights.
+/// Since we don't have access to the gating layer output separately, we use
+/// consistent hashing on the token text to select top-K experts deterministically.
+/// This provides uniform load distribution across experts.
+///
+/// When MoE GGUF formats expose the gating network separately, this will be
+/// replaced with actual learned gating weights.
+fn hash_gate_select(token: &str, total_experts: u32, active_experts: u32) -> Vec<u32> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    token.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    // Select top-K experts via hash partitioning
+    let mut selected = Vec::with_capacity(active_experts as usize);
+    for k in 0..active_experts {
+        let expert_id = ((hash.wrapping_add(k as u64 * 0x9e3779b97f4a7c15)) % total_experts as u64) as u32;
+        if !selected.contains(&expert_id) {
+            selected.push(expert_id);
+        }
+    }
+
+    // Fill remaining slots if hash collided
+    while selected.len() < active_experts as usize {
+        for e in 0..total_experts {
+            if !selected.contains(&e) {
+                selected.push(e);
+                break;
+            }
+        }
+    }
+
+    selected
+}
+
+/// Batched dispatch: accumulate tokens for each expert, send when batch is full.
+struct ExpertBatcher {
+    batches: HashMap<String, Vec<serde_json::Value>>,
+    batch_size: usize,
+}
+
+impl ExpertBatcher {
+    fn new(batch_size: usize) -> Self {
+        Self {
+            batches: HashMap::new(),
+            batch_size: batch_size.max(1),
+        }
+    }
+
+    /// Add a token to the batch for a subject. Returns the batch if full.
+    fn add(&mut self, subject: &str, token: serde_json::Value) -> Option<(String, Vec<serde_json::Value>)> {
+        let batch = self.batches.entry(subject.to_string()).or_insert_with(Vec::new);
+        batch.push(token);
+
+        if batch.len() >= self.batch_size {
+            let full_batch = std::mem::take(batch);
+            Some((subject.to_string(), full_batch))
+        } else {
+            None
+        }
+    }
+
+    /// Flush all remaining batches (called at end of generation)
+    fn flush_all(&mut self) -> Vec<(String, Vec<serde_json::Value>)> {
+        self.batches.drain()
+            .filter(|(_, batch)| !batch.is_empty())
+            .collect()
+    }
+}
+
 /// Expert member: subscribes to its expert dispatch subjects, processes tokens,
-/// returns results. Currently a passthrough — true expert weight loading will
-/// be added when MoE-specific GGUF formats are supported.
+/// returns results to the combine subject.
 async fn execute_expert_member(
     nats: &NatsAgent,
     job: &AssignJob,
@@ -317,40 +438,88 @@ async fn execute_expert_member(
         expert_subs.push((eid_str.clone(), sub));
     }
 
-    // Main loop: receive dispatched tokens, process, return results
-    // For now, experts are idle since the router generates directly.
-    // When MoE dispatch is implemented, this loop will:
-    // 1. Receive token batches from router
-    // 2. Run expert forward pass on the tokens
-    // 3. Publish results to combine subject
+    // Main loop: receive dispatched token batches, process, return results
+    let mut tokens_processed: u64 = 0;
+    let mut combined_subs: Vec<async_nats::Subscriber> = Vec::new();
+
+    // Flatten all expert subscriptions into a single receiver
+    // We'll use a simple polling approach since we have multiple subs
+    for (eid_str, sub) in expert_subs {
+        combined_subs.push(sub);
+    }
+
+    info!(job_id, "Expert member processing tokens for experts {:?}", expert_ids);
+
     loop {
-        select! {
-            msg = control_sub.next() => {
-                match msg {
-                    Some(msg) => {
+        // Check all expert subscriptions for incoming token batches
+        let mut received_batch = false;
+
+        for sub in combined_subs.iter_mut() {
+            // Non-blocking check via select with zero timeout
+            select! {
+                msg = sub.next() => {
+                    if let Some(msg) = msg {
+                        if let Ok(batch) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                            let token_count = batch.get("tokens")
+                                .and_then(|t| t.as_array())
+                                .map(|arr| arr.len())
+                                .unwrap_or(0);
+
+                            tokens_processed += token_count as u64;
+                            received_batch = true;
+
+                            // Process tokens (currently passthrough — expert forward pass
+                            // will be added when MoE GGUF expert shards are available)
+                            // Publish results to combine subject
+                            let result = serde_json::json!({
+                                "job_id": job_id,
+                                "expert_ids": &expert_ids,
+                                "tokens_processed": token_count,
+                                "seq": batch.get("seq"),
+                            });
+                            let _ = nats.publish_raw(
+                                &config.expert_subjects.combine,
+                                serde_json::to_vec(&result).unwrap_or_default(),
+                            ).await;
+
+                            // Report load to coordinator
+                            let _ = nats.publish_raw(
+                                &config.expert_subjects.status,
+                                serde_json::to_vec(&serde_json::json!({
+                                    "host_id": nats.host_id(),
+                                    "status": "load",
+                                    "tokens_in_flight": tokens_processed,
+                                })).unwrap_or_default(),
+                            ).await;
+                        }
+                    }
+                }
+                msg = control_sub.next() => {
+                    if let Some(msg) = msg {
                         if let Ok(ctrl) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
-                            match ctrl.get("action").and_then(|a| a.as_str()) {
-                                Some("stop") => {
-                                    info!(job_id, "Expert member received stop");
-                                    break;
-                                }
-                                _ => {}
+                            if ctrl.get("action").and_then(|a| a.as_str()) == Some("stop") {
+                                info!(job_id, "Expert member received stop ({} tokens processed)", tokens_processed);
+                                return Ok(());
                             }
                         }
                     }
-                    None => break,
+                }
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() {
+                        info!(job_id, "Expert member cancelled");
+                        return Ok(());
+                    }
                 }
             }
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() {
-                    info!(job_id, "Expert member cancelled");
-                    break;
-                }
-            }
+
+            if received_batch { break; } // Process one batch then re-check control
+        }
+
+        if !received_batch {
+            // No batch available, brief sleep to avoid busy-wait
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -385,6 +554,44 @@ mod tests {
         assert_eq!(config.total_experts, 8);
         assert_eq!(config.active_experts, 2);
         assert_eq!(config.expert_subjects.dispatch.len(), 2);
+    }
+
+    #[test]
+    fn test_hash_gate_select() {
+        let selected = hash_gate_select("hello", 8, 2);
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|&e| e < 8));
+
+        // Same token → same experts (deterministic)
+        let selected2 = hash_gate_select("hello", 8, 2);
+        assert_eq!(selected, selected2);
+
+        // Different token → likely different experts
+        let selected3 = hash_gate_select("world", 8, 2);
+        // (Not guaranteed to be different, but statistically likely)
+        assert_eq!(selected3.len(), 2);
+    }
+
+    #[test]
+    fn test_expert_batcher() {
+        let mut batcher = ExpertBatcher::new(3);
+
+        // Add 2 tokens — no flush
+        assert!(batcher.add("sub.0", serde_json::json!({"t": 1})).is_none());
+        assert!(batcher.add("sub.0", serde_json::json!({"t": 2})).is_none());
+
+        // Third token triggers flush
+        let result = batcher.add("sub.0", serde_json::json!({"t": 3}));
+        assert!(result.is_some());
+        let (subj, batch) = result.unwrap();
+        assert_eq!(subj, "sub.0");
+        assert_eq!(batch.len(), 3);
+
+        // flush_all returns remaining
+        batcher.add("sub.1", serde_json::json!({"t": 4}));
+        let remaining = batcher.flush_all();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "sub.1");
     }
 
     #[test]

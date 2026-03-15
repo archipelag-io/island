@@ -374,8 +374,8 @@ async fn execute_draft(
     Ok(())
 }
 
-/// Verify Island: receives draft token batches, runs verification via
-/// logits.rs, publishes acceptance results back to draft.
+/// Verify Island: loads verifier model ONCE, then receives draft token batches
+/// and verifies incrementally without reloading. Publishes acceptance results.
 async fn execute_verify(
     nats: &NatsAgent,
     job: &AssignJob,
@@ -387,15 +387,54 @@ async fn execute_verify(
     let job_id = &job.job_id;
     let threshold = config.acceptance_threshold;
 
-    // Subscribe to draft batches
     let mut draft_sub = nats.subscribe_ring(&config.spec_subjects.draft).await
         .context("Failed to subscribe to draft subject")?;
 
     let model_path_owned = model_path.to_string();
     let context_size = job.model_context_size.unwrap_or(2048);
 
-    info!(job_id, "Verify Island listening for draft batches (threshold={})", threshold);
+    info!(job_id, "Verify Island loading model for incremental verification");
 
+    // Channel for sending batches to the verification thread
+    let (batch_tx, batch_rx) = std::sync::mpsc::channel::<(DraftBatch, tokio::sync::oneshot::Sender<VerifyResult>)>();
+
+    // Spawn a long-lived verification thread that keeps the model loaded
+    let verify_handle = tokio::task::spawn_blocking(move || {
+        unsafe {
+            let c_path = std::ffi::CString::new(model_path_owned.as_str()).unwrap();
+            let mut model_params = llama_cpp_sys::llama_model_default_params();
+            model_params.n_gpu_layers = 99;
+
+            let model = llama_cpp_sys::llama_load_model_from_file(c_path.as_ptr(), model_params);
+            if model.is_null() {
+                tracing::error!("Failed to load verifier model");
+                return;
+            }
+
+            let mut ctx_params = llama_cpp_sys::llama_context_default_params();
+            ctx_params.n_ctx = context_size;
+
+            let ctx = llama_cpp_sys::llama_new_context_with_model(model, ctx_params);
+            if ctx.is_null() {
+                llama_cpp_sys::llama_free_model(model);
+                tracing::error!("Failed to create verifier context");
+                return;
+            }
+
+            tracing::info!("Verifier model loaded, processing batches incrementally");
+
+            // Process batches using the same loaded model/context
+            while let Ok((batch, reply_tx)) = batch_rx.recv() {
+                let result = verify_batch_incremental(ctx, model, &batch, context_size, threshold);
+                let _ = reply_tx.send(result);
+            }
+
+            llama_cpp_sys::llama_free(ctx);
+            llama_cpp_sys::llama_free_model(model);
+        }
+    });
+
+    // Main loop: receive draft batches, send to verification thread, publish results
     loop {
         select! {
             msg = draft_sub.next() => {
@@ -404,51 +443,37 @@ async fn execute_verify(
                         match serde_json::from_slice::<DraftBatch>(&msg.payload) {
                             Ok(batch) => {
                                 let batch_len = batch.tokens.len();
-                                info!(job_id, "Verifying {} draft tokens", batch_len);
+                                info!(job_id, "Verifying {} draft tokens (incremental)", batch_len);
 
-                                // Run verification via logits FFI
-                                let model_path_clone = model_path_owned.clone();
-                                let result = tokio::task::spawn_blocking(move || {
-                                    crate::logits::verify_draft_tokens(
-                                        &model_path_clone,
-                                        &batch.context_so_far,
-                                        &batch.tokens,
-                                        context_size,
-                                        threshold,
-                                    )
-                                }).await?;
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-                                match result {
-                                    Ok(verify_result) => {
-                                        info!(
-                                            job_id,
-                                            "Verified: {}/{} accepted",
-                                            verify_result.accepted_count,
-                                            verify_result.draft_count,
-                                        );
+                                if batch_tx.send((batch, reply_tx)).is_ok() {
+                                    match reply_rx.await {
+                                        Ok(verify_result) => {
+                                            info!(job_id, "Verified: {}/{} accepted",
+                                                verify_result.accepted_count, verify_result.draft_count);
 
-                                        nats.publish_raw(
-                                            &config.spec_subjects.verify,
-                                            serde_json::to_vec(&verify_result)?,
-                                        ).await?;
-                                    }
-                                    Err(e) => {
-                                        warn!(job_id, "Verification failed: {}, accepting all", e);
-                                        let fallback = VerifyResult {
-                                            accepted_count: batch_len,
-                                            corrected_token: None,
-                                            draft_count: batch_len,
-                                        };
-                                        nats.publish_raw(
-                                            &config.spec_subjects.verify,
-                                            serde_json::to_vec(&fallback)?,
-                                        ).await?;
+                                            nats.publish_raw(
+                                                &config.spec_subjects.verify,
+                                                serde_json::to_vec(&verify_result)?,
+                                            ).await?;
+                                        }
+                                        Err(_) => {
+                                            warn!(job_id, "Verify thread dropped reply, accepting all");
+                                            let fallback = VerifyResult {
+                                                accepted_count: batch_len,
+                                                corrected_token: None,
+                                                draft_count: batch_len,
+                                            };
+                                            nats.publish_raw(
+                                                &config.spec_subjects.verify,
+                                                serde_json::to_vec(&fallback)?,
+                                            ).await?;
+                                        }
                                     }
                                 }
                             }
-                            Err(e) => {
-                                warn!(job_id, "Failed to parse draft batch: {}", e);
-                            }
+                            Err(e) => warn!(job_id, "Failed to parse draft batch: {}", e),
                         }
                     }
                     None => break,
@@ -473,7 +498,100 @@ async fn execute_verify(
         }
     }
 
+    // Drop the batch sender to signal the verify thread to exit
+    drop(batch_tx);
+    let _ = verify_handle.await;
+
     Ok(())
+}
+
+/// Verify a batch of draft tokens using an already-loaded model context.
+/// This avoids the overhead of model loading per batch.
+///
+/// # Safety
+/// Requires valid llama context and model pointers.
+unsafe fn verify_batch_incremental(
+    ctx: *mut llama_cpp_sys::llama_context,
+    model: *const llama_cpp_sys::llama_model,
+    batch: &DraftBatch,
+    context_size: u32,
+    threshold: f64,
+) -> VerifyResult {
+    // Tokenize context + draft tokens
+    let c_text = match std::ffi::CString::new(batch.context_so_far.as_str()) {
+        Ok(c) => c,
+        Err(_) => return accept_all(batch),
+    };
+
+    let max_tok = context_size as i32;
+    let mut tokens = vec![0i32; max_tok as usize];
+    let n_ctx = llama_cpp_sys::llama_tokenize(
+        model, c_text.as_ptr(), batch.context_so_far.len() as i32,
+        tokens.as_mut_ptr(), max_tok, true, false,
+    );
+
+    if n_ctx < 0 {
+        return accept_all(batch);
+    }
+    tokens.truncate(n_ctx as usize);
+
+    // Append draft token IDs
+    for dt in &batch.tokens {
+        tokens.push(dt.token_id);
+    }
+
+    // Decode all tokens
+    let llama_batch = llama_cpp_sys::llama_batch_get_one(
+        tokens.as_mut_ptr(), tokens.len() as i32, 0, 0,
+    );
+
+    if llama_cpp_sys::llama_decode(ctx, llama_batch) != 0 {
+        return accept_all(batch);
+    }
+
+    let n_vocab = llama_cpp_sys::llama_n_vocab(model) as usize;
+    let verify_start = n_ctx as usize;
+
+    let mut accepted_count = 0;
+    let mut corrected_token = None;
+
+    for (i, draft) in batch.tokens.iter().enumerate() {
+        let pos = (verify_start + i) as i32;
+        let logits_ptr = llama_cpp_sys::llama_get_logits_ith(ctx, pos);
+        if logits_ptr.is_null() { break; }
+
+        let logits = std::slice::from_raw_parts(logits_ptr, n_vocab);
+        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let log_sum_exp = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+        let verifier_log_prob = logits[draft.token_id as usize] - log_sum_exp;
+
+        if (verifier_log_prob as f64) > threshold.ln() {
+            accepted_count += 1;
+        } else {
+            let best = logits.iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, &l)| (idx as i32, l - log_sum_exp))
+                .unwrap_or((draft.token_id, verifier_log_prob));
+
+            corrected_token = Some(DraftToken {
+                token_id: best.0,
+                text: String::new(),
+                log_prob: best.1,
+            });
+            break;
+        }
+    }
+
+    VerifyResult { accepted_count, corrected_token, draft_count: batch.tokens.len() }
+}
+
+fn accept_all(batch: &DraftBatch) -> VerifyResult {
+    VerifyResult {
+        accepted_count: batch.tokens.len(),
+        corrected_token: None,
+        draft_count: batch.tokens.len(),
+    }
 }
 
 #[cfg(test)]
