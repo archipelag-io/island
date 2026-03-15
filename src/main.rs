@@ -18,6 +18,7 @@ mod messages;
 mod metrics;
 mod model_cache;
 mod nats;
+mod preload;
 #[cfg(target_os = "linux")]
 mod oci;
 #[cfg(feature = "onnx")]

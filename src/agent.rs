@@ -169,6 +169,24 @@ impl Agent {
         // Detect capabilities once at startup
         let capabilities = self.detect_capabilities();
 
+        // Preload starter models based on hardware (background task)
+        {
+            let starter_models = crate::preload::select_starter_models(
+                capabilities.ram_mb,
+                capabilities.gpu_vram_mb,
+                &self.config.preload,
+            );
+            if !starter_models.is_empty() {
+                let state = self.state.clone();
+                tokio::spawn(async move {
+                    let st = state.read().await;
+                    if let Some(cache) = st.model_cache() {
+                        crate::preload::preload_models(cache, starter_models).await;
+                    }
+                });
+            }
+        }
+
         // Initial registration
         self.register_and_setup(&capabilities).await?;
 

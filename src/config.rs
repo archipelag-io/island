@@ -44,6 +44,37 @@ pub struct AgentConfig {
     /// Model cache settings (for GGUF, ONNX, diffusers models)
     #[serde(default)]
     pub model_cache: ModelCacheConfig,
+
+    /// Model preloading settings
+    #[serde(default)]
+    pub preload: PreloadConfig,
+}
+
+/// Model preloading configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct PreloadConfig {
+    /// Enable automatic model preloading at startup (default: true)
+    #[serde(default = "default_preload_enabled")]
+    pub enabled: bool,
+
+    /// Explicit list of model URIs to preload (overrides auto-selection).
+    /// If empty, auto-selects based on hardware capabilities.
+    /// Example: ["hf://Qwen/Qwen3.5-0.8B-GGUF", "hf://openai/whisper-base"]
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+fn default_preload_enabled() -> bool {
+    true
+}
+
+impl Default for PreloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            models: Vec::new(),
+        }
+    }
 }
 
 /// Model cache configuration for downloaded ML models
@@ -229,6 +260,7 @@ impl Default for AgentConfig {
             signing: SigningConfig::default(),
             registry: RegistryConfig::default(),
             model_cache: ModelCacheConfig::default(),
+            preload: PreloadConfig::default(),
         }
     }
 }
