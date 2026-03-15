@@ -92,9 +92,12 @@ pub async fn execute_expert_job(
 
     let model_path_str = model_path.to_string_lossy().to_string();
 
-    // For router: attempt to extract per-layer gating weights from the model
-    if role == "router" {
+    // For router: attempt to extract per-layer gating weights and build ExpertGate
+    let expert_gate = if role == "router" {
         let mp = model_path_str.clone();
+        let total_experts = expert_config.total_experts;
+        let active_experts = expert_config.active_experts;
+
         match tokio::task::spawn_blocking(move || {
             crate::gguf_format::extract_all_gating_weights(std::path::Path::new(&mp))
         }).await {
@@ -103,25 +106,57 @@ pub async fn execute_expert_job(
                     job_id, "Extracted per-layer MoE gating weights from {} layers",
                     gating_data.len()
                 );
-                // Store gating data for use during token routing
-                // The router's execute function will pick these up
-                let mut gating_info = std::collections::HashMap::new();
-                for gwd in &gating_data {
-                    gating_info.insert(gwd.layer_id, (gwd.n_experts, gwd.hidden_dim));
+
+                let mut gate = crate::gating::ExpertGate::new(
+                    crate::gating::GatingStrategy::Hash,
+                    total_experts,
+                    active_experts,
+                );
+
+                // Install per-layer weights
+                let mut per_layer = HashMap::new();
+                for gwd in gating_data {
+                    let matrix = gwd.to_f32_matrix();
+                    let weights = crate::gating::NativeGatingWeights {
+                        weights: matrix,
+                        bias: None,
+                        input_mode: crate::gating::GatingInputMode::EmbeddingDot,
+                    };
+                    per_layer.insert(gwd.layer_id, weights);
                 }
-                info!(job_id, "Gating layers: {:?}", gating_info.keys().collect::<Vec<_>>());
+
+                info!(job_id, "Installed per-layer gating for {} layers", per_layer.len());
+                gate.set_per_layer_weights(per_layer);
+                Some(gate)
             }
             Ok(Ok(_)) => {
-                info!(job_id, "No MoE gating tensors found in router model — using hash-based routing");
+                info!(job_id, "No MoE gating tensors — using hash-based routing");
+                Some(crate::gating::ExpertGate::new(
+                    crate::gating::GatingStrategy::Hash,
+                    total_experts,
+                    active_experts,
+                ))
             }
             Ok(Err(e)) => {
-                info!(job_id, "Could not extract gating weights: {} — using hash-based routing", e);
+                info!(job_id, "Gating extraction failed: {} — using hash-based routing", e);
+                Some(crate::gating::ExpertGate::new(
+                    crate::gating::GatingStrategy::Hash,
+                    total_experts,
+                    active_experts,
+                ))
             }
             Err(e) => {
-                info!(job_id, "Gating extraction task failed: {} — using hash-based routing", e);
+                info!(job_id, "Gating task failed: {} — using hash-based routing", e);
+                Some(crate::gating::ExpertGate::new(
+                    crate::gating::GatingStrategy::Hash,
+                    total_experts,
+                    active_experts,
+                ))
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Signal ready
     nats.publish_raw(
@@ -173,7 +208,7 @@ pub async fn execute_expert_job(
     info!(job_id, role, "Expert session started");
 
     match role.as_str() {
-        "router" => execute_router(nats, job, &expert_config, &mut control_sub, cancel_rx).await,
+        "router" => execute_router(nats, job, &expert_config, expert_gate, &mut control_sub, cancel_rx).await,
         "expert" => execute_expert_member(nats, job, &expert_config, &mut control_sub, cancel_rx).await,
         _ => anyhow::bail!("Unknown expert role: {}", role),
     }
@@ -188,6 +223,7 @@ async fn execute_router(
     nats: &NatsAgent,
     job: &AssignJob,
     config: &ExpertConfig,
+    gate: Option<crate::gating::ExpertGate>,
     control_sub: &mut async_nats::Subscriber,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -290,11 +326,12 @@ async fn execute_router(
         seq += 1;
 
         // Gate: select which experts should process this token
-        let selected_experts = hash_gate_select(
-            &token,
-            config.total_experts,
-            config.active_experts,
-        );
+        let selected_experts = if let Some(ref g) = gate {
+            let decision = g.route(&token, None);
+            decision.expert_ids
+        } else {
+            hash_gate_select(&token, config.total_experts, config.active_experts)
+        };
 
         // Dispatch to selected experts (batched)
         for expert_id in &selected_experts {
