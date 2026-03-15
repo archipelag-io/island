@@ -736,6 +736,19 @@ async fn execute_job(
         }
     }
 
+    // Check for expert config — MoE jobs bypass normal runtime dispatch
+    #[cfg(feature = "pipeline")]
+    if let Some(ref ec_value) = job.expert_config {
+        match serde_json::from_value::<crate::expert::ExpertConfig>(ec_value.clone()) {
+            Ok(expert_config) => {
+                return crate::expert::execute_expert_job(nats, state, &job, expert_config, cancel_rx).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse expert_config: {}, falling back to normal dispatch", e);
+            }
+        }
+    }
+
     // Route based on runtime type
     match job.runtime_type.as_str() {
         "wasm" => execute_wasm_job(nats, state, &job, cancel_rx).await,

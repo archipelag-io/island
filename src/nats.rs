@@ -207,6 +207,9 @@ pub struct AssignJob {
     /// Pipeline configuration (present when this is a pipeline shard job)
     #[serde(default)]
     pub pipeline_config: Option<serde_json::Value>,
+    /// Expert configuration (present when this is an MoE expert/router job)
+    #[serde(default)]
+    pub expert_config: Option<serde_json::Value>,
 }
 
 fn default_runtime_type() -> String {

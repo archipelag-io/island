@@ -11,6 +11,8 @@ mod config;
 mod diffusers;
 mod docker;
 mod executor;
+#[cfg(feature = "pipeline")]
+mod expert;
 #[cfg(feature = "gguf")]
 mod gguf;
 #[cfg(feature = "pipeline")]
