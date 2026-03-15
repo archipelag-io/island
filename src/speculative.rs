@@ -53,6 +53,20 @@ struct DraftBatch {
     context_so_far: String,
     tokens: Vec<DraftToken>,
     seq: u64,
+    /// Which draft Island sent this batch (for multi-draft best-of-N selection)
+    #[serde(default)]
+    draft_index: u32,
+}
+
+/// Extended verify result that includes which draft was selected (for multi-draft)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BestOfNResult {
+    /// The verify result for the winning draft
+    result: VerifyResult,
+    /// Which draft index won
+    winning_draft: u32,
+    /// Acceptance rates for all drafts evaluated
+    all_rates: Vec<f64>,
 }
 
 pub async fn execute_speculative_job(
@@ -272,11 +286,16 @@ async fn execute_draft(
         }).collect();
 
         // Send batch to verify Island
+        let draft_index = config.shard_spec.get("draft_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
         let batch_msg = DraftBatch {
             job_id: job_id.clone(),
             context_so_far: context_text.clone(),
             tokens: draft_tokens.clone(),
             seq: seq + 1,
+            draft_index,
         };
 
         nats.publish_raw(
@@ -434,7 +453,16 @@ async fn execute_verify(
         }
     });
 
-    // Main loop: receive draft batches, send to verification thread, publish results
+    // Determine draft count for best-of-N collection
+    let draft_count = config.shard_spec.get("draft_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as usize;
+
+    info!(job_id, "Verify Island: draft_count={}, collecting best-of-N batches", draft_count);
+
+    // Main loop: collect N draft batches, verify each, pick best, publish winner
+    let mut pending_batches: Vec<DraftBatch> = Vec::with_capacity(draft_count);
+
     loop {
         select! {
             msg = draft_sub.next() => {
@@ -442,35 +470,65 @@ async fn execute_verify(
                     Some(msg) => {
                         match serde_json::from_slice::<DraftBatch>(&msg.payload) {
                             Ok(batch) => {
-                                let batch_len = batch.tokens.len();
-                                info!(job_id, "Verifying {} draft tokens (incremental)", batch_len);
+                                pending_batches.push(batch);
 
-                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                // When we have batches from all drafts (or just 1 for single-draft)
+                                if pending_batches.len() >= draft_count {
+                                    let winner = if pending_batches.len() == 1 {
+                                        // Single draft — verify directly
+                                        let batch = pending_batches.remove(0);
+                                        let batch_len = batch.tokens.len();
+                                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-                                if batch_tx.send((batch, reply_tx)).is_ok() {
-                                    match reply_rx.await {
-                                        Ok(verify_result) => {
-                                            info!(job_id, "Verified: {}/{} accepted",
-                                                verify_result.accepted_count, verify_result.draft_count);
-
-                                            nats.publish_raw(
-                                                &config.spec_subjects.verify,
-                                                serde_json::to_vec(&verify_result)?,
-                                            ).await?;
-                                        }
-                                        Err(_) => {
-                                            warn!(job_id, "Verify thread dropped reply, accepting all");
-                                            let fallback = VerifyResult {
+                                        if batch_tx.send((batch, reply_tx)).is_ok() {
+                                            reply_rx.await.unwrap_or(VerifyResult {
                                                 accepted_count: batch_len,
                                                 corrected_token: None,
                                                 draft_count: batch_len,
-                                            };
-                                            nats.publish_raw(
-                                                &config.spec_subjects.verify,
-                                                serde_json::to_vec(&fallback)?,
-                                            ).await?;
+                                            })
+                                        } else {
+                                            VerifyResult { accepted_count: batch_len, corrected_token: None, draft_count: batch_len }
                                         }
-                                    }
+                                    } else {
+                                        // Multi-draft: verify all, pick best
+                                        let mut best_result = VerifyResult { accepted_count: 0, corrected_token: None, draft_count: 0 };
+                                        let mut best_rate: f64 = -1.0;
+                                        let mut all_rates = Vec::new();
+
+                                        for batch in pending_batches.drain(..) {
+                                            let batch_len = batch.tokens.len();
+                                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+                                            let result = if batch_tx.send((batch, reply_tx)).is_ok() {
+                                                reply_rx.await.unwrap_or(VerifyResult {
+                                                    accepted_count: batch_len, corrected_token: None, draft_count: batch_len,
+                                                })
+                                            } else {
+                                                VerifyResult { accepted_count: batch_len, corrected_token: None, draft_count: batch_len }
+                                            };
+
+                                            let rate = crate::logits::acceptance_rate(&result);
+                                            all_rates.push(rate);
+
+                                            if rate > best_rate {
+                                                best_rate = rate;
+                                                best_result = result;
+                                            }
+                                        }
+
+                                        info!(job_id, "Best-of-{}: rates={:?}, winner accepted {}/{}",
+                                            all_rates.len(), all_rates, best_result.accepted_count, best_result.draft_count);
+
+                                        best_result
+                                    };
+
+                                    pending_batches.clear();
+
+                                    info!(job_id, "Verified: {}/{} accepted", winner.accepted_count, winner.draft_count);
+                                    nats.publish_raw(
+                                        &config.spec_subjects.verify,
+                                        serde_json::to_vec(&winner)?,
+                                    ).await?;
                                 }
                             }
                             Err(e) => warn!(job_id, "Failed to parse draft batch: {}", e),
@@ -651,6 +709,7 @@ mod tests {
             context_so_far: "Hello".into(),
             tokens: vec![DraftToken { token_id: 1, text: " world".into(), log_prob: -0.5 }],
             seq: 1,
+            draft_index: 0,
         };
         let json = serde_json::to_string(&batch).unwrap();
         assert!(json.contains("\"context_so_far\":\"Hello\""));

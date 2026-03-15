@@ -13,6 +13,8 @@ mod docker;
 mod executor;
 #[cfg(feature = "pipeline")]
 mod expert;
+#[cfg(feature = "pipeline")]
+mod gating;
 #[cfg(feature = "gguf")]
 mod gguf;
 #[cfg(feature = "pipeline")]
