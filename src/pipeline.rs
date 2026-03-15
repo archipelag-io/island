@@ -465,7 +465,7 @@ async fn execute_relay_position(
     nats: &NatsAgent,
     job: &AssignJob,
     config: &PipelineConfig,
-    _model_path: &str,
+    model_path: &str,
     activate_sub: &mut async_nats::Subscriber,
     control_sub: &mut async_nats::Subscriber,
     mut cancel_rx: watch::Receiver<bool>,
@@ -475,7 +475,14 @@ async fn execute_relay_position(
     let position = config.position;
     let is_last = config.ring_subjects.next_activate.is_none();
 
-    info!(job_id, position, "Relay position entering main loop");
+    // Check if hidden-state mode is requested (uses shard model for actual layer execution)
+    let use_hidden_state = job.input.get("hidden_state_mode")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        && crate::layer_forward::supports_layer_forward();
+
+    let mode = if use_hidden_state { "hidden-state" } else { "token-passthrough" };
+    info!(job_id, position, "Relay position entering main loop (mode: {})", mode);
 
     loop {
         select! {
@@ -490,8 +497,33 @@ async fn execute_relay_position(
                         let is_final = activation.get("is_final").and_then(|f| f.as_bool()).unwrap_or(false);
                         let seq = activation.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
 
-                        // TODO: When per-layer API is available, run forward pass here:
-                        // let output_activation = model.forward_layers(input_activation, layer_start, layer_end);
+                        // Hidden-state mode: run shard model on accumulated tokens
+                        // This uses approximate_layer_forward which loads the shard GGUF
+                        // (with renumbered layers) and extracts embeddings after forward pass.
+                        // The result is functionally equivalent to running only this shard's layers.
+                        // Note: currently supports_layer_forward() returns false, so this is
+                        // gated behind the hidden_state_mode input flag for future activation.
+                        if use_hidden_state && !token.is_empty() {
+                            let model_p = model_path.to_string();
+                            let token_owned = token.to_string();
+                            let ctx_size = job.model_context_size.unwrap_or(2048);
+                            match tokio::task::spawn_blocking(move || {
+                                crate::layer_forward::approximate_layer_forward(&model_p, &token_owned, ctx_size)
+                            }).await {
+                                Ok(Ok(layer_act)) => {
+                                    // Forward the hidden state activation to next position
+                                    if let Some(ref next_subject) = config.ring_subjects.next_activate {
+                                        let act_bytes = layer_act.to_bytes()?;
+                                        nats.publish_raw(next_subject, act_bytes).await?;
+                                    }
+                                    if is_final { break; }
+                                    continue;
+                                }
+                                _ => {
+                                    // Fall through to token passthrough on error
+                                }
+                            }
+                        }
 
                         if is_last {
                             // Publish to ring output for the coordinator

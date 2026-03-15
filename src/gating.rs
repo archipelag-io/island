@@ -47,6 +47,26 @@ pub struct RoutingDecision {
     pub strategy: GatingStrategy,
 }
 
+/// Native MoE gating weights extracted from a model's gating layer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeGatingWeights {
+    /// Gating weight matrix (n_vocab × n_experts or n_embd × n_experts)
+    pub weights: Vec<Vec<f32>>,
+    /// Bias vector (n_experts), if present
+    pub bias: Option<Vec<f32>>,
+    /// How to interpret the input (token_id lookup vs embedding dot product)
+    pub input_mode: GatingInputMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum GatingInputMode {
+    /// Look up gating weights by token ID (fast, sparse)
+    TokenLookup,
+    /// Dot product of token embedding with weight matrix (dense)
+    EmbeddingDot,
+}
+
 /// Gate that selects experts for tokens
 pub struct ExpertGate {
     strategy: GatingStrategy,
@@ -54,6 +74,8 @@ pub struct ExpertGate {
     active_experts: u32,
     /// Expert centroids for embedding-based routing (expert_id → centroid vector)
     centroids: Vec<Vec<f32>>,
+    /// Native gating weights extracted from MoE model
+    native_weights: Option<NativeGatingWeights>,
     /// Round-robin counter
     rr_counter: std::sync::atomic::AtomicU64,
 }
@@ -66,6 +88,7 @@ impl ExpertGate {
             total_experts,
             active_experts,
             centroids: Vec::new(),
+            native_weights: None,
             rr_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -80,8 +103,78 @@ impl ExpertGate {
         }
     }
 
-    /// Route a token to top-K experts based on the current strategy
+    /// Set native MoE gating weights extracted from the model.
+    /// When set, routing uses the learned gating function directly.
+    pub fn set_native_weights(&mut self, weights: NativeGatingWeights) {
+        self.native_weights = Some(weights);
+    }
+
+    /// Route a token using native gating weights (when available).
+    /// Computes expert selection probabilities from the learned gating function.
+    fn route_native(&self, token_id: Option<i32>, embedding: Option<&[f32]>) -> Option<RoutingDecision> {
+        let weights = self.native_weights.as_ref()?;
+
+        let expert_scores: Vec<f32> = match weights.input_mode {
+            GatingInputMode::TokenLookup => {
+                let tid = token_id? as usize;
+                if tid >= weights.weights.len() { return None; }
+                weights.weights[tid].clone()
+            }
+            GatingInputMode::EmbeddingDot => {
+                let emb = embedding?;
+                // Dot product: scores[e] = sum(emb[i] * weights[i][e]) + bias[e]
+                let n_experts = self.total_experts as usize;
+                let mut scores = vec![0.0f32; n_experts];
+                for (i, &e_val) in emb.iter().enumerate() {
+                    if i < weights.weights.len() {
+                        for (e, score) in scores.iter_mut().enumerate() {
+                            if e < weights.weights[i].len() {
+                                *score += e_val * weights.weights[i][e];
+                            }
+                        }
+                    }
+                }
+                if let Some(ref bias) = weights.bias {
+                    for (e, score) in scores.iter_mut().enumerate() {
+                        if e < bias.len() {
+                            *score += bias[e];
+                        }
+                    }
+                }
+                scores
+            }
+        };
+
+        // Top-K selection with softmax
+        let mut indexed: Vec<(u32, f32)> = expert_scores.iter()
+            .enumerate()
+            .map(|(i, &s)| (i as u32, s))
+            .collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let k = self.active_experts as usize;
+        let selected: Vec<(u32, f32)> = indexed.into_iter().take(k).collect();
+
+        let max_s = selected.iter().map(|(_, s)| *s).fold(f32::NEG_INFINITY, f32::max);
+        let exp_sum: f32 = selected.iter().map(|(_, s)| (s - max_s).exp()).sum();
+        let weights_vec: Vec<f32> = selected.iter().map(|(_, s)| (s - max_s).exp() / exp_sum).collect();
+        let expert_ids: Vec<u32> = selected.iter().map(|(id, _)| *id).collect();
+
+        Some(RoutingDecision { expert_ids, weights: weights_vec, strategy: GatingStrategy::Embedding })
+    }
+
+    /// Route a token to top-K experts based on the current strategy.
+    /// If native gating weights are set, they take priority over all strategies.
     pub fn route(&self, token: &str, embedding: Option<&[f32]>) -> RoutingDecision {
+        // Try native gating first (learned weights from MoE model)
+        if self.native_weights.is_some() {
+            // Extract token_id from token string (simple hash for now)
+            let token_id = token.bytes().next().map(|b| b as i32);
+            if let Some(decision) = self.route_native(token_id, embedding) {
+                return decision;
+            }
+        }
+
         match self.strategy {
             GatingStrategy::Hash => self.route_hash(token),
             GatingStrategy::Embedding => {
