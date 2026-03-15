@@ -20,7 +20,7 @@ pub async fn execute_gguf_job(
     state: &Arc<RwLock<StateManager>>,
     _config: &AgentConfig,
     job: &AssignJob,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let job_id = &job.job_id;
 

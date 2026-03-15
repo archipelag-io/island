@@ -17,14 +17,17 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::select;
 use tokio::sync::{watch, RwLock};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::model_cache::ModelCache;
 use crate::nats::{AssignJob, NatsAgent};
 use crate::state::StateManager;
 
 /// Magic bytes for activation header
 const ACTIVATION_MAGIC: &[u8; 4] = b"ARCP";
+
+/// Default number of tokens to batch before sending an activation message.
+/// Higher values reduce NATS overhead but add latency. 1 = no batching (stream per-token).
+const DEFAULT_MICROBATCH_SIZE: usize = 1;
 
 /// Pipeline configuration sent by the coordinator
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -322,36 +325,75 @@ async fn execute_first_position(
         Ok::<u64, anyhow::Error>(token_count)
     });
 
+    // Microbatch size: how many tokens to collect before sending an activation message.
+    // Higher values reduce NATS message overhead but add per-batch latency.
+    let microbatch_size = job
+        .input
+        .get("microbatch_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_MICROBATCH_SIZE as u64) as usize;
+
     // Stream tokens — either to next position (as activation) or directly to ring output
     let mut seq: u64 = 0;
     let mut cancelled = false;
+    let mut token_batch = Vec::with_capacity(microbatch_size.max(1));
+
     loop {
         select! {
             token = rx.recv() => {
                 match token {
                     Some(token_str) => {
-                        seq += 1;
-                        if is_last {
-                            // We're the only Island — publish tokens to ring output
-                            let output = serde_json::json!({
-                                "job_id": job_id,
-                                "chunk": token_str,
-                                "is_final": false,
-                                "seq": seq,
-                            });
-                            nats.publish_ring_output(group_id, &output).await?;
-                        } else if let Some(ref next_subject) = config.ring_subjects.next_activate {
-                            // Forward token to next position as activation
-                            let activation = serde_json::json!({
-                                "job_id": job_id,
-                                "token": token_str,
-                                "seq": seq,
-                            });
-                            let payload = serde_json::to_vec(&activation)?;
-                            nats.publish_raw(next_subject, payload).await?;
+                        token_batch.push(token_str);
+
+                        // Flush when batch is full
+                        if token_batch.len() >= microbatch_size {
+                            seq += 1;
+                            let batch_text: String = token_batch.drain(..).collect();
+
+                            if is_last {
+                                let output = serde_json::json!({
+                                    "job_id": job_id,
+                                    "chunk": batch_text,
+                                    "is_final": false,
+                                    "seq": seq,
+                                });
+                                nats.publish_ring_output(group_id, &output).await?;
+                            } else if let Some(ref next_subject) = config.ring_subjects.next_activate {
+                                let activation = serde_json::json!({
+                                    "job_id": job_id,
+                                    "token": batch_text,
+                                    "seq": seq,
+                                });
+                                let payload = serde_json::to_vec(&activation)?;
+                                nats.publish_raw(next_subject, payload).await?;
+                            }
                         }
                     }
-                    None => break, // Channel closed — generation done
+                    None => {
+                        // Channel closed — flush remaining tokens
+                        if !token_batch.is_empty() {
+                            seq += 1;
+                            let batch_text: String = token_batch.drain(..).collect();
+                            if is_last {
+                                let output = serde_json::json!({
+                                    "job_id": job_id,
+                                    "chunk": batch_text,
+                                    "is_final": false,
+                                    "seq": seq,
+                                });
+                                nats.publish_ring_output(group_id, &output).await?;
+                            } else if let Some(ref next_subject) = config.ring_subjects.next_activate {
+                                let activation = serde_json::json!({
+                                    "job_id": job_id,
+                                    "token": batch_text,
+                                    "seq": seq,
+                                });
+                                let payload = serde_json::to_vec(&activation)?;
+                                nats.publish_raw(next_subject, payload).await?;
+                            }
+                        }
+                        break;
+                    }
                 }
             }
             msg = control_sub.next() => {

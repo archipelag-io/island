@@ -107,6 +107,9 @@ pub struct PerformanceEstimates {
     pub wasm_memory_limit_mb: Option<u32>,
     /// Supported runtime types
     pub supported_runtimes: Vec<String>,
+    /// Round-trip time to NATS server in milliseconds (measured via request/reply)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_rtt_ms: Option<f32>,
 }
 
 /// Cache metrics snapshot for heartbeat
@@ -641,6 +644,36 @@ impl NatsAgent {
     /// Get the Island's host ID
     pub fn host_id(&self) -> &str {
         &self.host_id
+    }
+
+    /// Measure round-trip time to the NATS server in milliseconds.
+    /// Uses a request/reply on a per-host ping subject. Returns None on timeout or error.
+    pub async fn measure_rtt(&self) -> Option<f32> {
+        let subject = format!("host.{}.ping", self.host_id);
+        let start = std::time::Instant::now();
+
+        // Use a short timeout — we just want RTT, not a meaningful response
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.client.request(subject, "ping".into()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                let rtt = start.elapsed().as_secs_f32() * 1000.0;
+                Some(rtt)
+            }
+            _ => {
+                // NATS request/reply may not have a responder — fall back to flush timing
+                let start2 = std::time::Instant::now();
+                if self.client.flush().await.is_ok() {
+                    let rtt = start2.elapsed().as_secs_f32() * 1000.0;
+                    Some(rtt)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Renew lease for a running job

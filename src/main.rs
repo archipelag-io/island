@@ -19,8 +19,16 @@ mod metrics;
 mod model_cache;
 mod nats;
 #[cfg(feature = "pipeline")]
+#[allow(dead_code)]
+mod layer_executor;
+#[cfg(feature = "pipeline")]
 mod pipeline;
 mod preload;
+#[cfg(feature = "pipeline")]
+mod shard_split;
+#[cfg(feature = "pipeline")]
+#[allow(dead_code)]
+mod transport;
 #[cfg(target_os = "linux")]
 mod oci;
 #[cfg(feature = "onnx")]
@@ -60,6 +68,21 @@ struct Args {
     /// Run in Island mode (connect to NATS and wait for jobs)
     #[arg(long)]
     agent: bool,
+
+    /// Split a GGUF model into N shards for pipeline parallelism
+    #[cfg(feature = "pipeline")]
+    #[arg(long)]
+    split_model: Option<String>,
+
+    /// Number of shards to split into (default: 2, used with --split-model)
+    #[cfg(feature = "pipeline")]
+    #[arg(long, default_value = "2")]
+    shards: usize,
+
+    /// Output directory for shards (default: ./shards, used with --split-model)
+    #[cfg(feature = "pipeline")]
+    #[arg(long, default_value = "shards")]
+    output_dir: String,
 }
 
 #[tokio::main]
@@ -95,6 +118,16 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = config::load(&args.config)?;
     info!("Loaded configuration from {}", args.config);
+
+    // If split-model mode, split a GGUF file into shards and exit
+    #[cfg(feature = "pipeline")]
+    if let Some(model_path) = args.split_model {
+        info!("Splitting model {} into {} shards", model_path, args.shards);
+        let input = std::path::Path::new(&model_path);
+        let output = std::path::Path::new(&args.output_dir);
+        shard_split::split_model(input, args.shards, output)?;
+        return Ok(());
+    }
 
     // If WASM test mode, run a WASM module (no Docker needed)
     if let Some(wasm_path) = args.test_wasm {
