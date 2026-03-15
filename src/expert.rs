@@ -90,7 +90,38 @@ pub async fn execute_expert_job(
         .await
         .with_context(|| format!("Failed to download model: {}", model_url))?;
 
-    let _model_path_str = model_path.to_string_lossy().to_string();
+    let model_path_str = model_path.to_string_lossy().to_string();
+
+    // For router: attempt to extract per-layer gating weights from the model
+    if role == "router" {
+        let mp = model_path_str.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::gguf_format::extract_all_gating_weights(std::path::Path::new(&mp))
+        }).await {
+            Ok(Ok(gating_data)) if !gating_data.is_empty() => {
+                info!(
+                    job_id, "Extracted per-layer MoE gating weights from {} layers",
+                    gating_data.len()
+                );
+                // Store gating data for use during token routing
+                // The router's execute function will pick these up
+                let mut gating_info = std::collections::HashMap::new();
+                for gwd in &gating_data {
+                    gating_info.insert(gwd.layer_id, (gwd.n_experts, gwd.hidden_dim));
+                }
+                info!(job_id, "Gating layers: {:?}", gating_info.keys().collect::<Vec<_>>());
+            }
+            Ok(Ok(_)) => {
+                info!(job_id, "No MoE gating tensors found in router model — using hash-based routing");
+            }
+            Ok(Err(e)) => {
+                info!(job_id, "Could not extract gating weights: {} — using hash-based routing", e);
+            }
+            Err(e) => {
+                info!(job_id, "Gating extraction task failed: {} — using hash-based routing", e);
+            }
+        }
+    }
 
     // Signal ready
     nats.publish_raw(
