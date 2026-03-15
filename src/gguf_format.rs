@@ -249,6 +249,8 @@ pub fn split_by_layers(
             &gguf,
             &shard_tensors,
             &mut source_file,
+            layer_start,
+            shard_layers,
         )?;
 
         let file_size = std::fs::metadata(&shard_path)?.len();
@@ -280,12 +282,18 @@ pub fn split_by_layers(
     Ok(manifest_path)
 }
 
-/// Write a single shard GGUF file with selected tensors
+/// Write a single shard GGUF file with selected tensors.
+///
+/// Layer tensors are renumbered so that the shard is a valid standalone model:
+/// `blk.16.attn_q.weight` → `blk.0.attn_q.weight` (if layer_start=16).
+/// The `*.block_count` KV metadata is also updated to reflect the shard's layer count.
 fn write_shard_gguf(
     path: &Path,
     source: &GgufFile,
     tensors: &[&TensorInfo],
     source_file: &mut std::fs::File,
+    layer_start: u32,
+    shard_layer_count: u32,
 ) -> Result<String> {
     let mut out = std::fs::File::create(path)?;
     let mut hasher = Sha256::new();
@@ -297,22 +305,26 @@ fn write_shard_gguf(
 
     write_u32_hashed(&mut out, &mut hasher, GGUF_VERSION)?;
     write_i64_hashed(&mut out, &mut hasher, tensors.len() as i64)?;
-    write_i64_hashed(&mut out, &mut hasher, source.kv_count as i64)?;
 
-    // KV pairs (passthrough from source)
-    for kv in &source.kv_pairs {
+    // Count KV pairs (may add/modify block_count)
+    let kv_pairs = rewrite_kv_pairs(&source.kv_pairs, shard_layer_count);
+    write_i64_hashed(&mut out, &mut hasher, kv_pairs.len() as i64)?;
+
+    // KV pairs (with block_count updated)
+    for kv in &kv_pairs {
         write_string_hashed(&mut out, &mut hasher, &kv.key)?;
         write_u32_hashed(&mut out, &mut hasher, kv.value_type)?;
         out.write_all(&kv.raw_bytes)?;
         hasher.update(&kv.raw_bytes);
     }
 
-    // Tensor info
+    // Tensor info (with layer renumbering)
     let mut running_offset: u64 = 0;
     let mut tensor_data_offsets = Vec::new();
 
     for tensor in tensors {
-        write_string_hashed(&mut out, &mut hasher, &tensor.name)?;
+        let renamed = renumber_tensor_name(&tensor.name, layer_start);
+        write_string_hashed(&mut out, &mut hasher, &renamed)?;
         write_u32_hashed(&mut out, &mut hasher, tensor.n_dims)?;
         for &dim in &tensor.dims {
             write_i64_hashed(&mut out, &mut hasher, dim)?;
@@ -363,6 +375,40 @@ fn write_shard_gguf(
     }
 
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+/// Renumber layer tensor names so the shard is a valid standalone model.
+/// `blk.16.attn_q.weight` with layer_start=16 becomes `blk.0.attn_q.weight`.
+/// Non-layer tensors (token_embd, output, etc.) pass through unchanged.
+fn renumber_tensor_name(name: &str, layer_start: u32) -> String {
+    if let Some(layer_id) = extract_layer_id(name) {
+        let new_id = layer_id.saturating_sub(layer_start);
+        let prefix = format!("blk.{}.", layer_id);
+        let new_prefix = format!("blk.{}.", new_id);
+        name.replacen(&prefix, &new_prefix, 1)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Rewrite KV pairs to update block_count for the shard's layer count.
+/// Keys ending in `.block_count` (e.g., `llama.block_count`) are rewritten.
+fn rewrite_kv_pairs(source_kvs: &[KvPair], shard_layer_count: u32) -> Vec<KvPair> {
+    source_kvs
+        .iter()
+        .map(|kv| {
+            if kv.key.ends_with(".block_count") && kv.value_type == 4 {
+                // uint32 — rewrite to shard layer count
+                KvPair {
+                    key: kv.key.clone(),
+                    value_type: kv.value_type,
+                    raw_bytes: shard_layer_count.to_le_bytes().to_vec(),
+                }
+            } else {
+                kv.clone()
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -594,5 +640,38 @@ mod tests {
     fn test_ggml_type_size() {
         assert_eq!(ggml_type_size(0), 4.0); // F32
         assert_eq!(ggml_type_size(1), 2.0); // F16
+    }
+
+    #[test]
+    fn test_renumber_tensor_name() {
+        // Layer tensor renumbering
+        assert_eq!(renumber_tensor_name("blk.16.attn_q.weight", 16), "blk.0.attn_q.weight");
+        assert_eq!(renumber_tensor_name("blk.17.ffn_gate.weight", 16), "blk.1.ffn_gate.weight");
+        assert_eq!(renumber_tensor_name("blk.31.attn_output.weight", 16), "blk.15.attn_output.weight");
+        // First shard — no change
+        assert_eq!(renumber_tensor_name("blk.0.attn_q.weight", 0), "blk.0.attn_q.weight");
+        // Non-layer tensors pass through
+        assert_eq!(renumber_tensor_name("token_embd.weight", 16), "token_embd.weight");
+        assert_eq!(renumber_tensor_name("output.weight", 16), "output.weight");
+    }
+
+    #[test]
+    fn test_rewrite_kv_pairs() {
+        let kvs = vec![
+            KvPair { key: "general.name".into(), value_type: 8, raw_bytes: vec![3, 0, 0, 0, 0, 0, 0, 0, b'f', b'o', b'o'] },
+            KvPair { key: "llama.block_count".into(), value_type: 4, raw_bytes: 32u32.to_le_bytes().to_vec() },
+            KvPair { key: "llama.attention.head_count".into(), value_type: 4, raw_bytes: 32u32.to_le_bytes().to_vec() },
+        ];
+
+        let rewritten = rewrite_kv_pairs(&kvs, 16);
+        assert_eq!(rewritten.len(), 3);
+        // block_count should be rewritten to 16
+        assert_eq!(
+            u32::from_le_bytes([rewritten[1].raw_bytes[0], rewritten[1].raw_bytes[1], rewritten[1].raw_bytes[2], rewritten[1].raw_bytes[3]]),
+            16
+        );
+        // Other KVs unchanged
+        assert_eq!(rewritten[0].raw_bytes, kvs[0].raw_bytes);
+        assert_eq!(rewritten[2].raw_bytes, kvs[2].raw_bytes);
     }
 }

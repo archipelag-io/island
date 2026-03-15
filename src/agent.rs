@@ -270,6 +270,19 @@ impl Agent {
                     // Measure NATS RTT for pipeline formation scoring
                     perf_estimates.nats_rtt_ms = self.nats.measure_rtt().await;
 
+                    // Discover public address via STUN (for QUIC direct transport)
+                    #[cfg(feature = "pipeline")]
+                    if perf_estimates.public_addr.is_none() {
+                        match crate::stun::discover_public_addr().await {
+                            Ok(result) => {
+                                perf_estimates.public_addr = Some(result.public_addr.to_string());
+                            }
+                            Err(e) => {
+                                debug!("STUN discovery failed: {}", e);
+                            }
+                        }
+                    }
+
                     if let Err(e) = self.nats.send_enhanced_heartbeat(
                         active, system_snapshot, gpu_metrics, None, cache_snapshot, Some(perf_estimates)
                     ).await {

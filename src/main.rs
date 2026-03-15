@@ -29,7 +29,6 @@ mod preload;
 #[cfg(feature = "pipeline")]
 mod shard_split;
 #[cfg(feature = "pipeline")]
-#[allow(dead_code)]
 mod stun;
 #[cfg(feature = "pipeline")]
 #[allow(dead_code)]

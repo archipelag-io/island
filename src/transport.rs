@@ -28,6 +28,10 @@ pub enum TransportMode {
     Nats,
     /// Direct QUIC connection between Islands
     Quic,
+    /// QUIC with NATS relay fallback — tries QUIC first, falls back to NATS
+    /// if direct connection fails (NAT, firewall, symmetric NAT).
+    /// This is the recommended mode for production pipelines.
+    QuicWithRelay,
 }
 
 impl Default for TransportMode {
@@ -66,7 +70,7 @@ impl TransportSender {
         let mode = peer.map(|p| p.mode.clone()).unwrap_or_default();
 
         match mode {
-            TransportMode::Quic => {
+            TransportMode::Quic | TransportMode::QuicWithRelay => {
                 let addr = peer
                     .and_then(|p| p.address.as_deref())
                     .context("QUIC transport requires peer address")?;
@@ -77,7 +81,11 @@ impl TransportSender {
                         Ok(TransportSender::Quic { tx })
                     }
                     Err(e) => {
-                        warn!("QUIC transport to {} failed: {}, falling back to NATS", addr, e);
+                        if mode == TransportMode::QuicWithRelay {
+                            info!("QUIC to {} failed ({}), using NATS relay", addr, e);
+                        } else {
+                            warn!("QUIC transport to {} failed: {}, falling back to NATS", addr, e);
+                        }
                         Ok(TransportSender::Nats { subject: nats_subject })
                     }
                 }
@@ -121,7 +129,8 @@ impl TransportReceiver {
         Ok(TransportReceiver::Nats { sub })
     }
 
-    /// Create a receiver, optionally starting a QUIC listener
+    /// Create a receiver, optionally starting a QUIC listener.
+    /// Falls back to NATS if QUIC listener fails (relay mode).
     pub async fn new(nats: &NatsAgent, nats_subject: &str, listen_addr: Option<&str>) -> Result<Self> {
         match listen_addr {
             Some(addr) => {
@@ -131,7 +140,7 @@ impl TransportReceiver {
                         Ok(TransportReceiver::Quic { rx })
                     }
                     Err(e) => {
-                        warn!("QUIC listener on {} failed: {}, falling back to NATS", addr, e);
+                        info!("QUIC listener on {} failed ({}), using NATS relay", addr, e);
                         Self::nats(nats, nats_subject).await
                     }
                 }
