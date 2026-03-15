@@ -110,7 +110,7 @@ pub async fn execute_onnx_job(
         Ok(output) => {
             let output_json = serde_json::to_string(&output)?;
             nats.publish_output(job_id, 0, &output_json, true).await?;
-            nats.publish_status(job_id, "completed", None).await?;
+            nats.publish_status(job_id, "succeeded", None).await?;
         }
         Err(e) => {
             nats.publish_status(job_id, "failed", Some(format!("ONNX error: {}", e)))

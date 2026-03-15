@@ -147,7 +147,7 @@ pub async fn execute_gguf_job(
             });
             nats.publish_output(job_id, seq, &final_event.to_string(), true)
                 .await?;
-            nats.publish_status(job_id, "completed", None).await?;
+            nats.publish_status(job_id, "succeeded", None).await?;
             info!("GGUF job {} completed: {} tokens", job_id, token_count);
         }
         Err(e) => {

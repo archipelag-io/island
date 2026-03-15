@@ -339,7 +339,7 @@ pub async fn execute_diffusers_job(
                 true,
             )
             .await?;
-            nats.publish_status(job_id, "completed", None).await?;
+            nats.publish_status(job_id, "succeeded", None).await?;
             info!("Diffusers job {} completed: {}x{} PNG ({} bytes)", job_id, width, height, png_data.len());
         }
         Err(e) => {
