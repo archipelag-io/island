@@ -40,6 +40,8 @@ mod shard_split;
 #[cfg(feature = "pipeline")]
 mod speculative;
 #[cfg(feature = "pipeline")]
+mod tee;
+#[cfg(feature = "pipeline")]
 mod training;
 #[cfg(feature = "pipeline")]
 mod stun;

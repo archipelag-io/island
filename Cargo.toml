@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-pipeline = ["dep:quinn", "dep:rcgen", "dep:llama_cpp_sys", "dep:base64"]
+pipeline = ["dep:quinn", "dep:rcgen", "dep:llama_cpp_sys", "dep:base64", "dep:hostname"]
 onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:image", "dep:base64"]
 gguf = ["dep:llama_cpp"]
 diffusers = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers", "dep:image", "dep:base64", "dep:hf-hub"]
@@ -115,6 +115,7 @@ base64 = { version = "0.22", optional = true }
 # QUIC transport for pipeline activations (optional, feature-gated)
 quinn = { version = "0.11", optional = true }
 rcgen = { version = "0.13", optional = true }
+hostname = { version = "0.4", optional = true }
 
 # GPU detection (NVIDIA)
 # nvml-wrapper = "0.9"  # Uncomment when needed
