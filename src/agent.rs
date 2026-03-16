@@ -11,7 +11,8 @@ use crate::metrics::gpu::GpuMetricsCollector;
 use crate::metrics::gpu::bandwidth_for_gpu;
 use crate::nats::{
     self, AssignJob, CacheMetricsSnapshot, CancelJob, GpuMetricsSnapshot, HostCapabilities,
-    JobSubscription, NatsAgent, PerformanceEstimates, SystemMetricsSnapshot,
+    JobSubscription, NatsAgent, PerformanceEstimates, PreloadRecommendation,
+    RecommendationsResponse, SystemMetricsSnapshot,
 };
 use crate::security::registry::RegistryAllowlist;
 use crate::security::signing::SignatureVerifier;
@@ -206,6 +207,9 @@ impl Agent {
         // Subscribe to peer probe requests (for peer-to-peer RTT measurement)
         let mut probe_subscriber = self.nats.subscribe_probes().await?;
 
+        // Subscribe to preload recommendations from coordinator
+        let mut preload_subscriber = self.nats.subscribe_preload().await?;
+
         let mut consecutive_failures: u32 = 0;
 
         // GPU metrics collector
@@ -225,6 +229,10 @@ impl Agent {
         };
         let mut update_check_interval = tokio::time::interval(Duration::from_secs(1800));
         update_check_interval.tick().await; // consume first immediate tick
+
+        // Recommendation polling interval (every 15 minutes)
+        let mut recommendation_tick = tokio::time::interval(Duration::from_secs(900));
+        recommendation_tick.tick().await; // consume first immediate tick
 
         // Heartbeat interval
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(10));
@@ -386,6 +394,41 @@ impl Agent {
                     }
                 }
 
+                // Preload recommendation from coordinator (via NATS push)
+                msg = preload_subscriber.next() => {
+                    if let Some(msg) = msg {
+                        match serde_json::from_slice::<PreloadRecommendation>(&msg.payload) {
+                            Ok(rec) => {
+                                info!("Preload recommendation: {} (demand: {:?})", rec.workload_slug, rec.queued_demand);
+                                if let Some(url) = rec.model_url.clone() {
+                                    let state = self.state.clone();
+                                    let hash = rec.model_hash.clone();
+                                    let slug = rec.workload_slug.clone();
+                                    tokio::spawn(async move {
+                                        let st = state.read().await;
+                                        if let Some(model_cache) = st.model_cache() {
+                                            let model_cache = model_cache.clone();
+                                            drop(st); // release the read lock before long download
+                                            match model_cache.download_model(&url, hash.as_deref()).await {
+                                                Ok(path) => info!("Preloaded model for {}: {}", slug, path.display()),
+                                                Err(e) => warn!("Preload download failed for {} (non-fatal): {}", slug, e),
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse preload recommendation: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                // Periodic recommendation polling (every 15 minutes via HTTP API)
+                _ = recommendation_tick.tick() => {
+                    self.fetch_recommendations().await;
+                }
+
                 // Cache cleanup (every 5 minutes)
                 _ = cache_cleanup_interval.tick() => {
                     self.cache.cleanup_stale().await;
@@ -494,6 +537,67 @@ impl Agent {
             "Failed to recover subscription after {} attempts",
             MAX_ATTEMPTS
         )
+    }
+
+    /// Fetch preload recommendations from the coordinator HTTP API
+    async fn fetch_recommendations(&self) {
+        let api_url = match &self.config.coordinator.api_url {
+            Some(url) => url,
+            None => return, // no API URL configured, skip
+        };
+
+        let host_id = self.nats.host_id();
+        let url = format!(
+            "{}/api/v1/island/recommendations?host_id={}",
+            api_url, host_id
+        );
+
+        let client = reqwest::Client::new();
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<RecommendationsResponse>().await {
+                    Ok(body) => {
+                        info!(
+                            "Received {} recommendation(s) from coordinator",
+                            body.recommendations.len()
+                        );
+                        for rec in body.recommendations {
+                            if let Some(url) = rec.model_url {
+                                let state = self.state.clone();
+                                let hash = rec.model_hash;
+                                let slug = rec.workload_slug.clone();
+                                tokio::spawn(async move {
+                                    let st = state.read().await;
+                                    if let Some(model_cache) = st.model_cache() {
+                                        let model_cache = model_cache.clone();
+                                        drop(st);
+                                        info!("Preloading recommended model: {}", slug);
+                                        match model_cache
+                                            .download_model(&url, hash.as_deref())
+                                            .await
+                                        {
+                                            Ok(path) => {
+                                                info!("Preloaded: {} -> {}", slug, path.display())
+                                            }
+                                            Err(e) => {
+                                                warn!("Preload failed for {}: {}", slug, e)
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => warn!("Failed to parse recommendations: {}", e),
+                }
+            }
+            Ok(resp) => {
+                warn!("Recommendations API returned {}", resp.status());
+            }
+            Err(e) => {
+                warn!("Failed to fetch recommendations: {}", e);
+            }
+        }
     }
 
     /// Detect Island capabilities

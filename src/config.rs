@@ -154,6 +154,10 @@ pub struct HostConfig {
 pub struct CoordinatorConfig {
     /// NATS server URL
     pub nats_url: String,
+
+    /// Coordinator API URL for HTTP polling (e.g., "https://app.archipelag.io")
+    #[serde(default)]
+    pub api_url: Option<String>,
 }
 
 /// Docker configuration (reserved for future use)
@@ -253,6 +257,7 @@ impl Default for AgentConfig {
             host: HostConfig::default(),
             coordinator: CoordinatorConfig {
                 nats_url: "nats://localhost:4222".to_string(),
+                api_url: None,
             },
             docker: DockerConfig { socket: None },
             workload: WorkloadConfig {

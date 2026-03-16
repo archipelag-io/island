@@ -36,6 +36,10 @@ pub mod subjects {
         format!("host.{}.lease", host_id)
     }
 
+    pub fn preload(host_id: &str) -> String {
+        format!("host.{}.preload", host_id)
+    }
+
     pub const REGISTRATION: &str = "coordinator.hosts.register";
     pub const PAIRING: &str = "coordinator.hosts.pairing";
 }
@@ -307,6 +311,28 @@ pub struct CancelJob {
     pub job_id: String,
 }
 
+/// Preload recommendation from coordinator (demand-driven)
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct PreloadRecommendation {
+    #[serde(rename = "type")]
+    pub msg_type: Option<String>,
+    pub workload_slug: String,
+    pub model_url: Option<String>,
+    pub model_hash: Option<String>,
+    pub runtime_type: String,
+    pub estimated_earnings_per_job: Option<String>,
+    pub queued_demand: Option<u32>,
+    pub demand_score: Option<u32>,
+    pub priority: Option<String>,
+}
+
+/// Response from the coordinator recommendations API
+#[derive(Debug, Deserialize)]
+pub struct RecommendationsResponse {
+    pub recommendations: Vec<PreloadRecommendation>,
+}
+
 /// Lease renewal request to coordinator
 #[derive(Debug, Serialize)]
 pub struct LeaseRenewal {
@@ -494,6 +520,19 @@ impl NatsAgent {
             .context("Failed to subscribe to cancel")?;
 
         info!("Subscribed to cancel requests on {}", subject);
+        Ok(subscriber)
+    }
+
+    /// Subscribe to preload recommendations for this Island
+    pub async fn subscribe_preload(&self) -> Result<Subscriber> {
+        let subject = subjects::preload(&self.host_id);
+        let subscriber = self
+            .client
+            .subscribe(subject.clone())
+            .await
+            .context("Failed to subscribe to preload")?;
+
+        info!("Subscribed to preload recommendations: {}", subject);
         Ok(subscriber)
     }
 
