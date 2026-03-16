@@ -35,14 +35,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Clippy (warnings as errors)
+      - name: Clippy (warnings as errors, default features)
         run: cargo clippy -- -D warnings
+
+      - name: Clippy (diffusers feature)
+        run: cargo clippy --features diffusers -- -D warnings -A dead_code
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Run tests with coverage
-        run: cargo llvm-cov --text
+        run: cargo llvm-cov --features diffusers --text
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --features diffusers

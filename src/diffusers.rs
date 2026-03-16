@@ -27,10 +27,10 @@ struct ModelFiles {
 /// Execute a diffusers workload
 pub async fn execute_diffusers_job(
     nats: &NatsAgent,
-    state: &Arc<RwLock<StateManager>>,
+    _state: &Arc<RwLock<StateManager>>,
     _config: &AgentConfig,
     job: &AssignJob,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let job_id = &job.job_id;
 
@@ -59,6 +59,7 @@ pub async fn execute_diffusers_job(
     let num_steps = job
         .input
         .get("num_steps")
+        .or_else(|| job.input.get("steps"))
         .and_then(|v| v.as_u64())
         .unwrap_or(20) as usize;
 
@@ -98,13 +99,7 @@ pub async fn execute_diffusers_job(
     }
 
     // Emit download progress
-    nats.publish_output(
-        job_id,
-        0,
-        &serde_json::json!({"type": "progress", "phase": "downloading", "step": 0, "total": num_steps}).to_string(),
-        false,
-    )
-    .await?;
+    nats.publish_progress(job_id, 0, num_steps as u32).await?;
 
     // Resolve HuggingFace repo ID
     let repo_id = model_uri
@@ -261,18 +256,10 @@ pub async fn execute_diffusers_job(
             let rt = tokio::runtime::Handle::current();
             let n = nats_clone.clone();
             let jid = job_id_clone.clone();
-            let step = step_idx + 1;
-            let total = num_steps;
+            let step = (step_idx + 1) as u32;
+            let total = num_steps as u32;
             rt.spawn(async move {
-                let progress = serde_json::json!({
-                    "type": "progress",
-                    "phase": "diffusion",
-                    "step": step,
-                    "total": total
-                });
-                let _ = n
-                    .publish_output(&jid, step as u64, &progress.to_string(), false)
-                    .await;
+                let _ = n.publish_progress(&jid, step, total).await;
             });
         }
 
@@ -323,20 +310,13 @@ pub async fn execute_diffusers_job(
                 &png_data,
             );
 
-            let result_event = serde_json::json!({
-                "type": "image",
-                "format": "png",
-                "width": width,
-                "height": height,
-                "data": b64,
-                "size_bytes": png_data.len()
-            });
-
-            nats.publish_output(
+            nats.publish_image(
                 job_id,
-                (num_steps + 1) as u64,
-                &result_event.to_string(),
-                true,
+                &b64,
+                "png",
+                width as u32,
+                height as u32,
+                Some(seed),
             )
             .await?;
             nats.publish_status(job_id, "succeeded", None).await?;

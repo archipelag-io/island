@@ -101,11 +101,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --features diffusers --target ${{ matrix.target }}
 
       - name: Build (native)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features diffusers --target ${{ matrix.target }}
 
       - name: Download crun (Linux only)
         if: matrix.crun_arch
