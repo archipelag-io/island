@@ -213,6 +213,9 @@ pub struct AssignJob {
     /// Speculative decoding configuration (present when this is a draft/verify job)
     #[serde(default)]
     pub speculative_config: Option<serde_json::Value>,
+    /// Federated training configuration (present when this is a training participant job)
+    #[serde(default)]
+    pub training_config: Option<serde_json::Value>,
 }
 
 fn default_runtime_type() -> String {

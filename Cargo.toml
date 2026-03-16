@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-pipeline = ["dep:quinn", "dep:rcgen", "dep:llama_cpp_sys"]
+pipeline = ["dep:quinn", "dep:rcgen", "dep:llama_cpp_sys", "dep:base64"]
 onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:image", "dep:base64"]
 gguf = ["dep:llama_cpp"]
 diffusers = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers", "dep:image", "dep:base64", "dep:hf-hub"]

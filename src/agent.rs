@@ -762,6 +762,19 @@ async fn execute_job(
         }
     }
 
+    // Check for training config — federated training jobs
+    #[cfg(feature = "pipeline")]
+    if let Some(ref tc_value) = job.training_config {
+        match serde_json::from_value::<crate::training::TrainingConfig>(tc_value.clone()) {
+            Ok(training_config) => {
+                return crate::training::execute_training_job(nats, state, &job, training_config, cancel_rx).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse training_config: {}, falling back to normal dispatch", e);
+            }
+        }
+    }
+
     // Route based on runtime type
     match job.runtime_type.as_str() {
         "wasm" => execute_wasm_job(nats, state, &job, cancel_rx).await,
