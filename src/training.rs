@@ -185,26 +185,71 @@ pub async fn execute_training_job(
     Ok(())
 }
 
-/// Simulate gradient computation for a training round.
+/// Compute gradient for a training round.
 ///
-/// In production, this would:
-/// 1. Load the model with current weights
-/// 2. Train on local data for E epochs (using LoRA/QLoRA)
-/// 3. Compute delta: new_weights - old_weights
-/// 4. Return the flattened delta vector
+/// Two modes:
+/// 1. **Simulated** (current): deterministic perturbation vector for testing the protocol
+/// 2. **LoRA** (when available): actual backpropagation through adapter layers
 ///
-/// Currently returns a random perturbation vector as a placeholder.
+/// The LoRA path will use llama_cpp_sys FFI to:
+/// 1. Load the base model + LoRA adapter weights
+/// 2. Forward pass on training batch
+/// 3. Compute loss (cross-entropy on next-token prediction)
+/// 4. Backward pass through LoRA layers only (r=8, alpha=16 typical)
+/// 5. Return the LoRA weight deltas (much smaller than full model gradients)
+///
+/// LoRA gradient size: rank × (in_dim + out_dim) per adapted layer
+/// For rank=8, 32-layer model with 4096 hidden: ~2MB (vs ~14GB for full)
 fn compute_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
-    let dim = 1024; // Simulated gradient dimension
+    if lora_available() {
+        compute_lora_gradient(config, round)
+    } else {
+        compute_simulated_gradient(config, round)
+    }
+}
+
+/// Check if LoRA training is available in the current llama_cpp version
+fn lora_available() -> bool {
+    // When llama_cpp_sys exposes llama_train_* functions, this returns true
+    false
+}
+
+/// Simulated gradient for protocol testing
+fn compute_simulated_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
+    let dim = 1024;
     let lr = config.config.learning_rate as f32;
 
-    // Simulate gradient: small random perturbations scaled by learning rate
     (0..dim)
         .map(|i| {
             let seed = (round as f32 * 1000.0 + i as f32).sin() * lr;
             seed * 0.01
         })
         .collect()
+}
+
+/// LoRA gradient computation (stub — ready for when llama_cpp supports training)
+///
+/// Expected API:
+///   llama_lora_adapter_init(model, rank, alpha) → adapter
+///   llama_train_forward(ctx, adapter, batch) → loss
+///   llama_train_backward(ctx, adapter) → updates adapter weights
+///   llama_lora_get_weights(adapter) → weight data
+fn compute_lora_gradient(_config: &TrainingConfig, _round: u32) -> Vec<f32> {
+    // Placeholder — will be replaced with actual LoRA training:
+    //
+    // unsafe {
+    //     let adapter = llama_cpp_sys::llama_lora_adapter_init(model, rank, alpha);
+    //     for epoch in 0..config.config.local_epochs {
+    //         for batch in training_data.batches(config.config.batch_size) {
+    //             let loss = llama_cpp_sys::llama_train_forward(ctx, adapter, batch);
+    //             llama_cpp_sys::llama_train_backward(ctx, adapter);
+    //         }
+    //     }
+    //     let weights = llama_cpp_sys::llama_lora_get_weights(adapter);
+    //     // Compute delta: new_weights - initial_weights
+    //     weights_to_gradient_vector(weights)
+    // }
+    vec![0.0; 1024]
 }
 
 /// Encode gradient as base64 for JSON transport
