@@ -488,7 +488,7 @@ fn find_model_file(dir: &Path) -> Option<PathBuf> {
     if let Ok(read_dir) = std::fs::read_dir(dir) {
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.is_file() && !path.extension().map_or(false, |e| e == "tmp") {
+            if path.is_file() && path.extension().is_none_or(|e| e != "tmp") {
                 return Some(path);
             }
         }

@@ -327,10 +327,92 @@ pub struct ModuleInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[tokio::test]
     async fn test_executor_creation() {
         let executor = WasmExecutor::new();
         assert!(executor.is_ok());
+    }
+
+    // --- verify_wasm_hash tests ---
+
+    fn compute_sha256(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hex::encode(hasher.finalize())
+    }
+
+    #[test]
+    fn test_verify_wasm_hash_correct_hash() {
+        let data = b"hello wasm module";
+        let hash = compute_sha256(data);
+        assert!(verify_wasm_hash(data, &hash).is_ok());
+    }
+
+    #[test]
+    fn test_verify_wasm_hash_with_sha256_prefix() {
+        let data = b"hello wasm module";
+        let hash = compute_sha256(data);
+        let prefixed = format!("sha256:{}", hash);
+        assert!(verify_wasm_hash(data, &prefixed).is_ok());
+    }
+
+    #[test]
+    fn test_verify_wasm_hash_mismatch() {
+        let data = b"hello wasm module";
+        let wrong_hash = "0".repeat(64);
+        let result = verify_wasm_hash(data, &wrong_hash);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("hash verification failed"));
+    }
+
+    #[test]
+    fn test_verify_wasm_hash_case_insensitive() {
+        let data = b"test module bytes";
+        let hash = compute_sha256(data);
+        let upper_hash = hash.to_uppercase();
+        // The function lowercases the expected hash before comparing
+        assert!(verify_wasm_hash(data, &upper_hash).is_ok());
+    }
+
+    #[test]
+    fn test_verify_wasm_hash_empty_data() {
+        let data = b"";
+        let hash = compute_sha256(data);
+        assert!(verify_wasm_hash(data, &hash).is_ok());
+    }
+
+    // --- WasmConfig::default() tests ---
+
+    #[test]
+    fn test_wasm_config_default_values() {
+        let config = WasmConfig::default();
+        assert_eq!(config.module_path, "");
+        assert_eq!(config.input, "");
+        assert_eq!(config.max_memory_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.max_fuel, Some(100_000_000_000));
+        assert_eq!(config.timeout_seconds, 60);
+        assert!(config.expected_hash.is_none());
+    }
+
+    // --- validate_module tests ---
+
+    #[test]
+    fn test_validate_module_invalid_bytes() {
+        let executor = WasmExecutor::new().unwrap();
+        let tmp = std::env::temp_dir().join("invalid_module.wasm");
+        std::fs::write(&tmp, b"this is not valid wasm").unwrap();
+        let result = executor.validate_module(&tmp);
+        assert!(result.is_err());
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_validate_module_nonexistent_file() {
+        let executor = WasmExecutor::new().unwrap();
+        let result = executor.validate_module(Path::new("/nonexistent/module.wasm"));
+        assert!(result.is_err());
     }
 }

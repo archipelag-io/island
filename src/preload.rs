@@ -24,6 +24,7 @@ use crate::model_cache::ModelCache;
 
 /// A model to preload at startup
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // runtime field used by future preload filtering
 pub struct PreloadEntry {
     /// HuggingFace URI (hf://repo_id or hf://repo_id:filename)
     pub uri: String,

@@ -279,7 +279,7 @@ pub async fn run_verified_container(
 }
 
 /// Build the full image reference with digest for verification
-fn build_image_reference(image: &str, digest: Option<&str>) -> String {
+pub(crate) fn build_image_reference(image: &str, digest: Option<&str>) -> String {
     match digest {
         Some(d) if !d.is_empty() => {
             // If image already contains @sha256:, use as-is
@@ -622,7 +622,7 @@ async fn inspect_container_exit(docker: &Docker, container_id: &str) -> (Option<
 }
 
 /// Interpret container exit code to human-readable reason
-fn interpret_exit_code(code: i64) -> String {
+pub(crate) fn interpret_exit_code(code: i64) -> String {
     match code {
         1 => "General error (application failure)".to_string(),
         2 => "Misuse of shell command or incorrect arguments".to_string(),
@@ -656,7 +656,7 @@ fn interpret_exit_code(code: i64) -> String {
 }
 
 /// Get signal name from number
-fn signal_name(signal: i64) -> &'static str {
+pub(crate) fn signal_name(signal: i64) -> &'static str {
     match signal {
         1 => "SIGHUP",
         2 => "SIGINT",
@@ -674,5 +674,211 @@ fn signal_name(signal: i64) -> &'static str {
         14 => "SIGALRM",
         15 => "SIGTERM",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── build_image_reference ──────────────────────────────────────
+
+    #[test]
+    fn build_image_reference_without_digest() {
+        let result = build_image_reference("myregistry/myimage:latest", None);
+        assert_eq!(result, "myregistry/myimage:latest");
+    }
+
+    #[test]
+    fn build_image_reference_with_empty_digest() {
+        let result = build_image_reference("myregistry/myimage:latest", Some(""));
+        assert_eq!(result, "myregistry/myimage:latest");
+    }
+
+    #[test]
+    fn build_image_reference_with_sha256_prefixed_digest() {
+        let result = build_image_reference(
+            "myregistry/myimage:latest",
+            Some("sha256:abcdef1234567890"),
+        );
+        assert_eq!(result, "myregistry/myimage@sha256:abcdef1234567890");
+    }
+
+    #[test]
+    fn build_image_reference_with_bare_hex_digest() {
+        let result = build_image_reference("myregistry/myimage:latest", Some("abcdef1234567890"));
+        assert_eq!(result, "myregistry/myimage@sha256:abcdef1234567890");
+    }
+
+    #[test]
+    fn build_image_reference_already_contains_digest() {
+        let image = "myregistry/myimage@sha256:existingdigest";
+        let result = build_image_reference(image, Some("sha256:otherdigest"));
+        // Should keep the original image reference unchanged
+        assert_eq!(result, image);
+    }
+
+    // ── interpret_exit_code ────────────────────────────────────────
+
+    #[test]
+    fn interpret_exit_code_zero_is_unknown() {
+        // Exit code 0 is not explicitly handled (it means success, not a crash)
+        let result = interpret_exit_code(0);
+        assert!(result.contains("Unknown error"));
+    }
+
+    #[test]
+    fn interpret_exit_code_known_codes() {
+        assert!(interpret_exit_code(1).contains("General error"));
+        assert!(interpret_exit_code(2).contains("Misuse of shell"));
+        assert!(interpret_exit_code(126).contains("not executable"));
+        assert!(interpret_exit_code(127).contains("not found"));
+        assert!(interpret_exit_code(128).contains("Invalid exit"));
+    }
+
+    #[test]
+    fn interpret_exit_code_signal_137_sigkill() {
+        let result = interpret_exit_code(137);
+        assert!(result.contains("SIGKILL"));
+        assert!(result.contains("OOM"));
+    }
+
+    #[test]
+    fn interpret_exit_code_signal_139_sigsegv() {
+        let result = interpret_exit_code(139);
+        assert!(result.contains("SIGSEGV"));
+    }
+
+    #[test]
+    fn interpret_exit_code_signal_143_sigterm() {
+        let result = interpret_exit_code(143);
+        assert!(result.contains("SIGTERM"));
+    }
+
+    #[test]
+    fn interpret_exit_code_unknown_signal_range() {
+        // Code 138 = 128 + 10 = SIGUSR1, falls through to the range match
+        let result = interpret_exit_code(138);
+        assert!(result.contains("signal 10"));
+        assert!(result.contains("SIGUSR1"));
+    }
+
+    #[test]
+    fn interpret_exit_code_unknown_code() {
+        let result = interpret_exit_code(42);
+        assert!(result.contains("Unknown error"));
+        assert!(result.contains("42"));
+    }
+
+    // ── signal_name ────────────────────────────────────────────────
+
+    #[test]
+    fn signal_name_known_signals() {
+        assert_eq!(signal_name(1), "SIGHUP");
+        assert_eq!(signal_name(2), "SIGINT");
+        assert_eq!(signal_name(9), "SIGKILL");
+        assert_eq!(signal_name(11), "SIGSEGV");
+        assert_eq!(signal_name(15), "SIGTERM");
+    }
+
+    #[test]
+    fn signal_name_unknown_signal() {
+        assert_eq!(signal_name(99), "unknown");
+        assert_eq!(signal_name(0), "unknown");
+    }
+
+    // ── ContainerConfig defaults ───────────────────────────────────
+
+    #[test]
+    fn container_config_defaults_are_security_sane() {
+        let config = ContainerConfig::default();
+
+        assert!(config.network_disabled, "network should be disabled by default");
+        assert!(config.read_only_rootfs, "rootfs should be read-only by default");
+        assert_eq!(config.timeout_seconds, 300);
+        assert_eq!(config.memory_bytes, Some(8 * 1024 * 1024 * 1024)); // 8GB
+        assert!(config.gpu_devices.is_none(), "no GPU by default");
+        assert!(config.expected_digest.is_none());
+        assert_eq!(config.sandbox_tier, Some("standard".to_string()));
+        assert!(config.seccomp_profile.is_none());
+    }
+
+    // ── apply_sandbox_tier ─────────────────────────────────────────
+
+    #[test]
+    fn apply_sandbox_tier_restricted() {
+        let mut config = ContainerConfig {
+            sandbox_tier: Some("restricted".to_string()),
+            gpu_devices: Some(vec!["0".to_string()]),
+            ..Default::default()
+        };
+        config.apply_sandbox_tier();
+
+        assert_eq!(config.memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(config.timeout_seconds, 60);
+        assert!(config.network_disabled);
+        assert!(config.gpu_devices.is_none(), "restricted tier strips GPU");
+        assert_eq!(config.cpu_quota, Some(100_000));
+        assert!(config.seccomp_profile.is_some());
+    }
+
+    #[test]
+    fn apply_sandbox_tier_standard() {
+        let mut config = ContainerConfig {
+            sandbox_tier: Some("standard".to_string()),
+            ..Default::default()
+        };
+        config.apply_sandbox_tier();
+
+        assert_eq!(config.memory_bytes, Some(1024 * 1024 * 1024));
+        assert_eq!(config.timeout_seconds, 300);
+        assert!(config.network_disabled);
+        assert_eq!(config.cpu_quota, Some(200_000));
+        assert!(config.seccomp_profile.is_some());
+    }
+
+    #[test]
+    fn apply_sandbox_tier_elevated_with_gpu() {
+        let mut config = ContainerConfig {
+            sandbox_tier: Some("elevated".to_string()),
+            gpu_devices: Some(vec!["0".to_string()]),
+            ..Default::default()
+        };
+        config.apply_sandbox_tier();
+
+        assert_eq!(config.memory_bytes, Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(config.timeout_seconds, 600);
+        assert!(!config.network_disabled, "elevated tier allows network");
+        assert_eq!(config.cpu_quota, Some(400_000));
+        assert!(config.seccomp_profile.is_some());
+    }
+
+    #[test]
+    fn apply_sandbox_tier_elevated_without_gpu() {
+        let mut config = ContainerConfig {
+            sandbox_tier: Some("elevated".to_string()),
+            gpu_devices: None,
+            ..Default::default()
+        };
+        config.apply_sandbox_tier();
+
+        assert!(!config.network_disabled);
+        assert!(config.seccomp_profile.is_some());
+    }
+
+    #[test]
+    fn apply_sandbox_tier_unknown_defaults_to_standard_seccomp() {
+        let mut config = ContainerConfig {
+            sandbox_tier: Some("unknown_tier".to_string()),
+            ..Default::default()
+        };
+        let original_memory = config.memory_bytes;
+        let original_timeout = config.timeout_seconds;
+        config.apply_sandbox_tier();
+
+        // Unknown tier only applies the default seccomp profile; does NOT override memory/timeout
+        assert_eq!(config.memory_bytes, original_memory);
+        assert_eq!(config.timeout_seconds, original_timeout);
+        assert!(config.seccomp_profile.is_some());
     }
 }

@@ -632,57 +632,14 @@ impl Agent {
     /// Compute performance estimates from hardware capabilities.
     /// These are sent with each heartbeat so the coordinator can rank Islands.
     fn compute_performance_estimates(&self, capabilities: &HostCapabilities) -> PerformanceEstimates {
-        let gpu_bw = capabilities.gpu_model.as_deref().map(|model| {
-            bandwidth_for_gpu(Some(model), capabilities.gpu_vram_mb)
-        });
-
-        // Estimate LLM tok/s for a reference 7B Q4_K_M model (~4.5 GB)
-        let reference_model_size_gb: f32 = 4.5;
-        let estimated_llm_tok_s = gpu_bw.map(|bw| {
-            let efficiency = 0.55;
-            let mode_factor = match capabilities.gpu_vram_mb {
-                Some(vram) if vram >= (reference_model_size_gb * 1024.0) as u32 => 1.0_f32,
-                Some(_) => 0.5,
-                None => 0.3,
-            };
-            (bw / reference_model_size_gb * efficiency * mode_factor).round()
-        });
-
-        // Max concurrent containers: min(CPU / 2, RAM / 2048) — each container gets at least 2 cores and 2 GB
-        let max_containers = std::cmp::min(
-            capabilities.cpu_cores / 2,
-            capabilities.ram_mb / 2048,
-        ).max(1);
-
-        // WASM memory: allow up to 75% of RAM for WASM linear memory
-        let wasm_mem = capabilities.ram_mb * 3 / 4;
-
-        // Supported runtimes — container and wasm are always available
-        #[allow(unused_mut)]
-        let mut runtimes = vec!["container".to_string(), "wasm".to_string()];
-        #[cfg(feature = "onnx")]
-        runtimes.push("onnx".to_string());
-        #[cfg(feature = "gguf")]
-        runtimes.push("llmcpp".to_string());
-        #[cfg(feature = "diffusers")]
-        runtimes.push("diffusers".to_string());
-
-        let estimates = PerformanceEstimates {
-            gpu_bandwidth_gb_s: gpu_bw,
-            estimated_llm_tok_s,
-            max_concurrent_containers: Some(max_containers),
-            wasm_memory_limit_mb: Some(wasm_mem),
-            supported_runtimes: runtimes,
-            nats_rtt_ms: None, // Populated during heartbeat
-            public_addr: None, // Populated via STUN discovery
-        };
+        let estimates = compute_performance_estimates_from_capabilities(capabilities);
 
         debug!(
-            "Performance estimates: bandwidth={:?} GB/s, llm_tok_s={:?}, max_containers={}, wasm_mem={}MB",
+            "Performance estimates: bandwidth={:?} GB/s, llm_tok_s={:?}, max_containers={:?}, wasm_mem={:?}MB",
             estimates.gpu_bandwidth_gb_s,
             estimates.estimated_llm_tok_s,
-            max_containers,
-            wasm_mem
+            estimates.max_concurrent_containers,
+            estimates.wasm_memory_limit_mb
         );
 
         estimates
@@ -1349,17 +1306,7 @@ fn detect_nvidia_gpu() -> (Option<String>, Option<u32>) {
     match output {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let line = stdout.lines().next().unwrap_or("");
-
-            // Parse "NVIDIA GeForce RTX 3080, 10240"
-            let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-            if parts.len() >= 2 {
-                let gpu_model = Some(parts[0].to_string());
-                let gpu_vram_mb = parts[1].parse::<u32>().ok();
-                (gpu_model, gpu_vram_mb)
-            } else {
-                (None, None)
-            }
+            parse_nvidia_smi_output(&stdout)
         }
         Ok(_) => {
             debug!("nvidia-smi returned non-zero exit code");
@@ -1369,5 +1316,183 @@ fn detect_nvidia_gpu() -> (Option<String>, Option<u32>) {
             debug!("nvidia-smi not available: {}", e);
             (None, None)
         }
+    }
+}
+
+/// Parse nvidia-smi CSV output into (gpu_model, gpu_vram_mb).
+///
+/// Expects format: "NVIDIA GeForce RTX 3080, 10240\n"
+pub(crate) fn parse_nvidia_smi_output(stdout: &str) -> (Option<String>, Option<u32>) {
+    let line = stdout.lines().next().unwrap_or("");
+    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+    if parts.len() >= 2 {
+        let gpu_model = Some(parts[0].to_string());
+        let gpu_vram_mb = parts[1].parse::<u32>().ok();
+        (gpu_model, gpu_vram_mb)
+    } else {
+        (None, None)
+    }
+}
+
+/// Compute performance estimates from hardware capabilities (pure logic).
+///
+/// This is the testable core of `Agent::compute_performance_estimates`.
+pub(crate) fn compute_performance_estimates_from_capabilities(
+    capabilities: &HostCapabilities,
+) -> PerformanceEstimates {
+    let gpu_bw = capabilities.gpu_model.as_deref().map(|model| {
+        bandwidth_for_gpu(Some(model), capabilities.gpu_vram_mb)
+    });
+
+    // Estimate LLM tok/s for a reference 7B Q4_K_M model (~4.5 GB)
+    let reference_model_size_gb: f32 = 4.5;
+    let estimated_llm_tok_s = gpu_bw.map(|bw| {
+        let efficiency = 0.55;
+        let mode_factor = match capabilities.gpu_vram_mb {
+            Some(vram) if vram >= (reference_model_size_gb * 1024.0) as u32 => 1.0_f32,
+            Some(_) => 0.5,
+            None => 0.3,
+        };
+        (bw / reference_model_size_gb * efficiency * mode_factor).round()
+    });
+
+    // Max concurrent containers: min(CPU / 2, RAM / 2048) — each container gets at least 2 cores and 2 GB
+    let max_containers = std::cmp::min(
+        capabilities.cpu_cores / 2,
+        capabilities.ram_mb / 2048,
+    )
+    .max(1);
+
+    // WASM memory: allow up to 75% of RAM for WASM linear memory
+    let wasm_mem = capabilities.ram_mb * 3 / 4;
+
+    // Supported runtimes — container and wasm are always available
+    #[allow(unused_mut)]
+    let mut runtimes = vec!["container".to_string(), "wasm".to_string()];
+    #[cfg(feature = "onnx")]
+    runtimes.push("onnx".to_string());
+    #[cfg(feature = "gguf")]
+    runtimes.push("llmcpp".to_string());
+    #[cfg(feature = "diffusers")]
+    runtimes.push("diffusers".to_string());
+
+    PerformanceEstimates {
+        gpu_bandwidth_gb_s: gpu_bw,
+        estimated_llm_tok_s,
+        max_concurrent_containers: Some(max_containers),
+        wasm_memory_limit_mb: Some(wasm_mem),
+        supported_runtimes: runtimes,
+        nats_rtt_ms: None,
+        public_addr: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parse_nvidia_smi_output tests ---
+
+    #[test]
+    fn parse_nvidia_smi_normal_output() {
+        let (model, vram) = parse_nvidia_smi_output("NVIDIA GeForce RTX 3080, 10240\n");
+        assert_eq!(model.as_deref(), Some("NVIDIA GeForce RTX 3080"));
+        assert_eq!(vram, Some(10240));
+    }
+
+    #[test]
+    fn parse_nvidia_smi_empty_output() {
+        let (model, vram) = parse_nvidia_smi_output("");
+        assert_eq!(model, None);
+        assert_eq!(vram, None);
+    }
+
+    #[test]
+    fn parse_nvidia_smi_malformed_no_comma() {
+        let (model, vram) = parse_nvidia_smi_output("NVIDIA GeForce RTX 3080");
+        assert_eq!(model, None);
+        assert_eq!(vram, None);
+    }
+
+    #[test]
+    fn parse_nvidia_smi_vram_not_a_number() {
+        let (model, vram) = parse_nvidia_smi_output("NVIDIA A100, notanumber\n");
+        assert_eq!(model.as_deref(), Some("NVIDIA A100"));
+        assert_eq!(vram, None);
+    }
+
+    #[test]
+    fn parse_nvidia_smi_extra_fields() {
+        // nvidia-smi with extra CSV columns should still work
+        let (model, vram) = parse_nvidia_smi_output("Tesla V100, 16384, 250\n");
+        assert_eq!(model.as_deref(), Some("Tesla V100"));
+        assert_eq!(vram, Some(16384));
+    }
+
+    // --- compute_performance_estimates_from_capabilities tests ---
+
+    #[test]
+    fn perf_estimates_no_gpu() {
+        let caps = HostCapabilities {
+            gpu_model: None,
+            gpu_vram_mb: None,
+            cpu_cores: 8,
+            ram_mb: 16384,
+            region: None,
+        };
+        let est = compute_performance_estimates_from_capabilities(&caps);
+        assert!(est.gpu_bandwidth_gb_s.is_none());
+        assert!(est.estimated_llm_tok_s.is_none());
+        // max_containers = min(8/2, 16384/2048) = min(4, 8) = 4
+        assert_eq!(est.max_concurrent_containers, Some(4));
+        // wasm_mem = 16384 * 3 / 4 = 12288
+        assert_eq!(est.wasm_memory_limit_mb, Some(12288));
+        assert!(est.supported_runtimes.contains(&"container".to_string()));
+        assert!(est.supported_runtimes.contains(&"wasm".to_string()));
+    }
+
+    #[test]
+    fn perf_estimates_with_gpu() {
+        let caps = HostCapabilities {
+            gpu_model: Some("RTX 3080".to_string()),
+            gpu_vram_mb: Some(10240),
+            cpu_cores: 16,
+            ram_mb: 65536,
+            region: Some("us-west".to_string()),
+        };
+        let est = compute_performance_estimates_from_capabilities(&caps);
+        // Should have GPU bandwidth from the lookup table
+        assert!(est.gpu_bandwidth_gb_s.is_some());
+        assert!(est.estimated_llm_tok_s.is_some());
+        // LLM tok/s should be positive
+        assert!(est.estimated_llm_tok_s.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn perf_estimates_max_containers_minimum_is_one() {
+        // A tiny host with 1 core and 1024 MB RAM
+        let caps = HostCapabilities {
+            gpu_model: None,
+            gpu_vram_mb: None,
+            cpu_cores: 1,
+            ram_mb: 1024,
+            region: None,
+        };
+        let est = compute_performance_estimates_from_capabilities(&caps);
+        // min(1/2, 1024/2048) = min(0, 0) = 0, clamped to 1
+        assert_eq!(est.max_concurrent_containers, Some(1));
+    }
+
+    #[test]
+    fn perf_estimates_wasm_memory_is_75_percent_of_ram() {
+        let caps = HostCapabilities {
+            gpu_model: None,
+            gpu_vram_mb: None,
+            cpu_cores: 4,
+            ram_mb: 8192,
+            region: None,
+        };
+        let est = compute_performance_estimates_from_capabilities(&caps);
+        assert_eq!(est.wasm_memory_limit_mb, Some(8192 * 3 / 4));
     }
 }

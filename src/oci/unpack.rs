@@ -149,6 +149,24 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Helper: create a tar.gz at `path` from a list of (entry_name, content) pairs.
+    fn create_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+
+        for (name, content) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, *name, &content[..])
+                .unwrap();
+        }
+        builder.finish().unwrap();
+    }
+
     #[test]
     fn test_unpack_layer_basic() {
         let tmp = tempfile::tempdir().unwrap();
@@ -156,24 +174,116 @@ mod tests {
         let rootfs = tmp.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
 
-        // Create a simple tar.gz with one file
-        let file = File::create(&layer_path).unwrap();
-        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
-        let mut builder = tar::Builder::new(encoder);
-
-        let content = b"hello world";
-        let mut header = tar::Header::new_gnu();
-        header.set_size(content.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "test.txt", &content[..])
-            .unwrap();
-        builder.finish().unwrap();
+        create_tar_gz(&layer_path, &[("test.txt", b"hello world")]);
 
         unpack_layer(&layer_path, &rootfs).unwrap();
 
         let result = fs::read_to_string(rootfs.join("test.txt")).unwrap();
         assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_whiteout_deletes_target_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        // Pre-create the file that should be whited-out
+        fs::write(rootfs.join("old.txt"), "should be deleted").unwrap();
+        assert!(rootfs.join("old.txt").exists());
+
+        // Apply a whiteout: .wh.old.txt in the root directory
+        handle_whiteout(".wh.old.txt", &rootfs);
+
+        assert!(!rootfs.join("old.txt").exists());
+    }
+
+    #[test]
+    fn test_whiteout_deletes_target_in_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let sub = rootfs.join("etc");
+        fs::create_dir_all(&sub).unwrap();
+
+        fs::write(sub.join("config"), "old config").unwrap();
+        assert!(sub.join("config").exists());
+
+        handle_whiteout("etc/.wh.config", &rootfs);
+
+        assert!(!sub.join("config").exists());
+    }
+
+    #[test]
+    fn test_opaque_whiteout_clears_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let sub = rootfs.join("var");
+        fs::create_dir_all(&sub).unwrap();
+
+        // Create some files in the directory
+        fs::write(sub.join("a.txt"), "aaa").unwrap();
+        fs::write(sub.join("b.txt"), "bbb").unwrap();
+
+        handle_whiteout("var/.wh..wh..opq", &rootfs);
+
+        // Directory itself still exists, but children should be gone
+        assert!(sub.exists());
+        assert!(fs::read_dir(&sub).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn test_whiteout_nonexistent_file_is_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        // Whiteout for a file that doesn't exist — should not panic
+        handle_whiteout(".wh.ghost.txt", &rootfs);
+        // No assertion needed; we just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layer_path = tmp.path().join("evil.tar.gz");
+        let rootfs = tmp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        // Create a tar.gz with a path containing ".."
+        create_tar_gz(&layer_path, &[("../../etc/passwd", b"evil")]);
+
+        unpack_layer(&layer_path, &rootfs).unwrap();
+
+        // The traversal path should have been skipped
+        assert!(!rootfs.join("etc/passwd").exists());
+        // Also verify nothing was written outside rootfs
+        assert!(!tmp.path().join("etc").exists());
+    }
+
+    #[test]
+    fn test_normal_path_extracted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layer_path = tmp.path().join("normal.tar.gz");
+        let rootfs = tmp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        create_tar_gz(
+            &layer_path,
+            &[
+                ("usr/bin/app", b"binary content"),
+                ("etc/config.toml", b"[settings]\nfoo = true"),
+            ],
+        );
+
+        unpack_layer(&layer_path, &rootfs).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(rootfs.join("usr/bin/app")).unwrap(),
+            "binary content"
+        );
+        assert_eq!(
+            fs::read_to_string(rootfs.join("etc/config.toml")).unwrap(),
+            "[settings]\nfoo = true"
+        );
     }
 }

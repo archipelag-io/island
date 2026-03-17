@@ -276,3 +276,167 @@ async fn cleanup_container(runtime_path: &Path, container_id: &str) {
         .output()
         .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> BundleConfig {
+        BundleConfig::default()
+    }
+
+    // --- build_mounts tests ---
+
+    #[test]
+    fn test_build_mounts_has_default_entries() {
+        let config = default_config();
+        let mounts = build_mounts(&config);
+        let arr = mounts.as_array().unwrap();
+
+        let destinations: Vec<&str> = arr
+            .iter()
+            .filter_map(|m| m["destination"].as_str())
+            .collect();
+
+        assert!(destinations.contains(&"/proc"), "missing /proc mount");
+        assert!(destinations.contains(&"/dev"), "missing /dev mount");
+        assert!(destinations.contains(&"/dev/pts"), "missing /dev/pts mount");
+        assert!(destinations.contains(&"/dev/shm"), "missing /dev/shm mount");
+        assert!(destinations.contains(&"/sys"), "missing /sys mount");
+        assert!(destinations.contains(&"/input.json"), "missing /input.json bind mount");
+    }
+
+    #[test]
+    fn test_build_mounts_tmpfs_tmp_when_read_only() {
+        let config = BundleConfig {
+            read_only_rootfs: true,
+            ..default_config()
+        };
+        let mounts = build_mounts(&config);
+        let arr = mounts.as_array().unwrap();
+
+        let tmp_mount = arr.iter().find(|m| m["destination"] == "/tmp");
+        assert!(tmp_mount.is_some(), "should have /tmp mount when read_only_rootfs");
+        assert_eq!(tmp_mount.unwrap()["type"], "tmpfs");
+    }
+
+    #[test]
+    fn test_build_mounts_no_tmp_when_writable() {
+        let config = BundleConfig {
+            read_only_rootfs: false,
+            ..default_config()
+        };
+        let mounts = build_mounts(&config);
+        let arr = mounts.as_array().unwrap();
+
+        let tmp_mount = arr.iter().find(|m| m["destination"] == "/tmp");
+        assert!(tmp_mount.is_none(), "should not have /tmp mount when rootfs is writable");
+    }
+
+    // --- build_resources tests ---
+
+    #[test]
+    fn test_build_resources_memory_limit() {
+        let config = BundleConfig {
+            memory_bytes: Some(512 * 1024 * 1024),
+            ..default_config()
+        };
+        let resources = build_resources(&config);
+
+        assert_eq!(resources["memory"]["limit"], 512 * 1024 * 1024);
+        assert_eq!(resources["memory"]["swap"], 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_build_resources_cpu_quota() {
+        let config = BundleConfig {
+            cpu_quota: Some(50000),
+            ..default_config()
+        };
+        let resources = build_resources(&config);
+
+        assert_eq!(resources["cpu"]["quota"], 50000);
+        assert_eq!(resources["cpu"]["period"], 100000);
+    }
+
+    #[test]
+    fn test_build_resources_devices_denied_by_default() {
+        let config = default_config();
+        let resources = build_resources(&config);
+
+        let devices = resources["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["allow"], false);
+    }
+
+    // --- build_namespaces tests ---
+
+    #[test]
+    fn test_build_namespaces_network_disabled() {
+        let config = BundleConfig {
+            network_disabled: true,
+            ..default_config()
+        };
+        let ns = build_namespaces(&config);
+        let arr = ns.as_array().unwrap();
+
+        let types: Vec<&str> = arr.iter().filter_map(|n| n["type"].as_str()).collect();
+        assert!(types.contains(&"network"), "should include network namespace when disabled");
+    }
+
+    #[test]
+    fn test_build_namespaces_network_enabled() {
+        let config = BundleConfig {
+            network_disabled: false,
+            ..default_config()
+        };
+        let ns = build_namespaces(&config);
+        let arr = ns.as_array().unwrap();
+
+        let types: Vec<&str> = arr.iter().filter_map(|n| n["type"].as_str()).collect();
+        assert!(!types.contains(&"network"), "should not include network namespace when enabled");
+        // Base namespaces always present
+        assert!(types.contains(&"pid"));
+        assert!(types.contains(&"mount"));
+    }
+
+    // --- generate_config tests ---
+
+    #[test]
+    fn test_generate_config_writes_valid_json() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let bundle_dir = tmp_dir.path();
+
+        // generate_config expects rootfs to be referenced but doesn't need it to exist
+        let config = default_config();
+        generate_config(bundle_dir, &config).unwrap();
+
+        let config_path = bundle_dir.join("config.json");
+        assert!(config_path.exists());
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        let spec: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        // Verify key security settings
+        assert_eq!(spec["process"]["noNewPrivileges"], true);
+        assert_eq!(spec["ociVersion"], "1.0.2");
+        assert_eq!(spec["hostname"], "archipelag");
+    }
+
+    #[test]
+    fn test_generate_config_capabilities_empty() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = default_config();
+        generate_config(tmp_dir.path(), &config).unwrap();
+
+        let contents = std::fs::read_to_string(tmp_dir.path().join("config.json")).unwrap();
+        let spec: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        let caps = &spec["process"]["capabilities"];
+        assert!(caps["bounding"].as_array().unwrap().is_empty());
+        assert!(caps["effective"].as_array().unwrap().is_empty());
+        assert!(caps["inheritable"].as_array().unwrap().is_empty());
+        assert!(caps["permitted"].as_array().unwrap().is_empty());
+        assert!(caps["ambient"].as_array().unwrap().is_empty());
+    }
+}

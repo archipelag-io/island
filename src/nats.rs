@@ -169,6 +169,7 @@ pub struct ActiveJobMetrics {
 
 /// Job assignment from coordinator
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)] // Protocol fields used by future features
 pub struct AssignJob {
     pub job_id: String,
     /// Workload ID (for cache tracking) — accepts both string and integer from coordinator
@@ -378,21 +379,10 @@ impl NatsAgent {
             .max_reconnects(None); // Reconnect forever
 
         // Parse credentials from URL (e.g., tls://user:pass@host:port)
-        let connect_url = if let Some(at_pos) = nats_url.find('@') {
-            let scheme_end = nats_url.find("://").map(|p| p + 3).unwrap_or(0);
-            let userinfo = &nats_url[scheme_end..at_pos];
-            if let Some(colon) = userinfo.find(':') {
-                let user = &userinfo[..colon];
-                let pass = &userinfo[colon + 1..];
-                options = options.user_and_password(user.to_string(), pass.to_string());
-            }
-            // Reconstruct URL without credentials
-            let scheme = &nats_url[..scheme_end];
-            let host_part = &nats_url[at_pos + 1..];
-            format!("{}{}", scheme, host_part)
-        } else {
-            nats_url.to_string()
-        };
+        let (connect_url, credentials) = parse_nats_url(nats_url);
+        if let Some((user, pass)) = credentials {
+            options = options.user_and_password(user, pass);
+        }
 
         let client = options
             .connect(&connect_url)
@@ -813,6 +803,7 @@ impl NatsAgent {
     // ========================================================================
 
     /// Subscribe to a ring subject (activation or control)
+    #[allow(dead_code)] // Pipeline ring feature not yet wired
     pub async fn subscribe_ring(&self, subject: &str) -> Result<Subscriber> {
         self.client
             .subscribe(subject.to_string())
@@ -821,6 +812,7 @@ impl NatsAgent {
     }
 
     /// Publish a status message on the ring status subject
+    #[allow(dead_code)] // Pipeline ring feature not yet wired
     pub async fn publish_ring_status(
         &self,
         group_id: &str,
@@ -836,6 +828,7 @@ impl NatsAgent {
     }
 
     /// Publish output from the last position in a ring
+    #[allow(dead_code)] // Pipeline ring feature not yet wired
     pub async fn publish_ring_output(
         &self,
         group_id: &str,
@@ -851,6 +844,7 @@ impl NatsAgent {
     }
 
     /// Publish raw bytes to a subject (for activation forwarding)
+    #[allow(dead_code)] // Pipeline ring feature not yet wired
     pub async fn publish_raw(&self, subject: &str, data: Vec<u8>) -> Result<()> {
         self.client
             .publish(subject.to_string(), data.into())
@@ -922,10 +916,589 @@ pub fn parse_job_assignment(msg: &Message) -> Result<AssignJob> {
     }
 }
 
+/// Parse a NATS URL, extracting credentials if present.
+///
+/// Returns `(clean_url, Option<(user, password)>)` where `clean_url` has
+/// credentials stripped (safe for logging / connecting).
+///
+/// Supports URLs like:
+/// - `nats://host:4222`            → no credentials
+/// - `tls://user:pass@host:4222`   → credentials extracted
+/// - `host:4222`                   → no scheme, no credentials
+pub fn parse_nats_url(nats_url: &str) -> (String, Option<(String, String)>) {
+    if let Some(at_pos) = nats_url.find('@') {
+        let scheme_end = nats_url.find("://").map(|p| p + 3).unwrap_or(0);
+        let userinfo = &nats_url[scheme_end..at_pos];
+        let credentials = if let Some(colon) = userinfo.find(':') {
+            let user = &userinfo[..colon];
+            let pass = &userinfo[colon + 1..];
+            Some((user.to_string(), pass.to_string()))
+        } else {
+            None
+        };
+        // Reconstruct URL without credentials
+        let scheme = &nats_url[..scheme_end];
+        let host_part = &nats_url[at_pos + 1..];
+        (format!("{}{}", scheme, host_part), credentials)
+    } else {
+        (nats_url.to_string(), None)
+    }
+}
+
 /// Get current timestamp in milliseconds
 fn chrono_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ========================================================================
+    // 1. Subject pattern generation
+    // ========================================================================
+
+    #[test]
+    fn test_subject_jobs() {
+        assert_eq!(subjects::jobs("abc-123"), "host.abc-123.jobs");
+    }
+
+    #[test]
+    fn test_subject_status() {
+        assert_eq!(subjects::status("host-1"), "host.host-1.status");
+    }
+
+    #[test]
+    fn test_subject_output() {
+        assert_eq!(subjects::output("host-1"), "host.host-1.output");
+    }
+
+    #[test]
+    fn test_subject_heartbeat() {
+        assert_eq!(subjects::heartbeat("id-42"), "host.id-42.heartbeat");
+    }
+
+    #[test]
+    fn test_subject_cancel() {
+        assert_eq!(subjects::cancel("h"), "host.h.cancel");
+    }
+
+    #[test]
+    fn test_subject_lease() {
+        assert_eq!(subjects::lease("host-1"), "host.host-1.lease");
+    }
+
+    #[test]
+    fn test_subject_preload() {
+        assert_eq!(subjects::preload("host-1"), "host.host-1.preload");
+    }
+
+    #[test]
+    fn test_subject_constants() {
+        assert_eq!(subjects::REGISTRATION, "coordinator.hosts.register");
+        assert_eq!(subjects::PAIRING, "coordinator.hosts.pairing");
+    }
+
+    // ========================================================================
+    // 2. AssignJob deserialization
+    // ========================================================================
+
+    fn full_assign_job_json() -> serde_json::Value {
+        json!({
+            "job_id": "job-abc-123",
+            "workload_id": "42",
+            "input": {"prompt": "Hello"},
+            "lease_expires": 1710000000000_i64,
+            "runtime_type": "container",
+            "container_image": "registry.example.com/llm-chat:latest",
+            "image_digest": "sha256:abcdef1234567890",
+            "wasm_url": null,
+            "wasm_hash": null,
+            "model_url": null,
+            "model_hash": null,
+            "model_context_size": null,
+            "model_temperature": null,
+            "onnx_model_url": null,
+            "onnx_model_hash": null,
+            "onnx_task_type": null,
+            "sandbox_tier": "standard"
+        })
+    }
+
+    #[test]
+    fn test_assign_job_all_fields() {
+        let json_str = serde_json::to_string(&full_assign_job_json()).unwrap();
+        let job: AssignJob = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(job.job_id, "job-abc-123");
+        assert_eq!(job.workload_id, Some("42".to_string()));
+        assert_eq!(job.runtime_type, "container");
+        assert_eq!(
+            job.container_image,
+            Some("registry.example.com/llm-chat:latest".to_string())
+        );
+        assert_eq!(
+            job.image_digest,
+            Some("sha256:abcdef1234567890".to_string())
+        );
+        assert_eq!(job.sandbox_tier, Some("standard".to_string()));
+        assert_eq!(job.lease_expires, 1710000000000);
+    }
+
+    #[test]
+    fn test_assign_job_workload_id_as_string() {
+        let j = json!({
+            "job_id": "j1",
+            "workload_id": "my-workload",
+            "input": {},
+            "lease_expires": 0
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.workload_id, Some("my-workload".to_string()));
+    }
+
+    #[test]
+    fn test_assign_job_workload_id_as_integer() {
+        let j = json!({
+            "job_id": "j1",
+            "workload_id": 99,
+            "input": {},
+            "lease_expires": 0
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.workload_id, Some("99".to_string()));
+    }
+
+    #[test]
+    fn test_assign_job_workload_id_null() {
+        let j = json!({
+            "job_id": "j1",
+            "workload_id": null,
+            "input": {},
+            "lease_expires": 0
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.workload_id, None);
+    }
+
+    #[test]
+    fn test_assign_job_workload_id_absent() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {},
+            "lease_expires": 0
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.workload_id, None);
+    }
+
+    #[test]
+    fn test_assign_job_missing_optional_fields() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {"prompt": "test"},
+            "lease_expires": 100
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.container_image, None);
+        assert_eq!(job.image_digest, None);
+        assert_eq!(job.wasm_url, None);
+        assert_eq!(job.wasm_hash, None);
+        assert_eq!(job.model_url, None);
+        assert_eq!(job.model_hash, None);
+        assert_eq!(job.model_context_size, None);
+        assert_eq!(job.model_temperature, None);
+        assert_eq!(job.onnx_model_url, None);
+        assert_eq!(job.onnx_model_hash, None);
+        assert_eq!(job.onnx_task_type, None);
+        assert_eq!(job.sandbox_tier, None);
+        assert_eq!(job.pipeline_config, None);
+        assert_eq!(job.expert_config, None);
+        assert_eq!(job.speculative_config, None);
+        assert_eq!(job.training_config, None);
+    }
+
+    #[test]
+    fn test_assign_job_default_runtime_type() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {},
+            "lease_expires": 0
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.runtime_type, "container");
+    }
+
+    #[test]
+    fn test_assign_job_runtime_type_wasm() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {},
+            "lease_expires": 0,
+            "runtime_type": "wasm",
+            "wasm_url": "https://example.com/module.wasm",
+            "wasm_hash": "sha256:abc"
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.runtime_type, "wasm");
+        assert_eq!(
+            job.wasm_url,
+            Some("https://example.com/module.wasm".to_string())
+        );
+    }
+
+    #[test]
+    fn test_assign_job_runtime_type_onnx() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {},
+            "lease_expires": 0,
+            "runtime_type": "onnx",
+            "onnx_model_url": "https://example.com/model.onnx",
+            "onnx_task_type": "text-classification"
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.runtime_type, "onnx");
+        assert_eq!(job.onnx_task_type, Some("text-classification".to_string()));
+    }
+
+    #[test]
+    fn test_assign_job_runtime_type_llmcpp() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {},
+            "lease_expires": 0,
+            "runtime_type": "llmcpp",
+            "model_url": "https://hf.co/model.gguf",
+            "model_hash": "sha256:xyz",
+            "model_context_size": 2048,
+            "model_temperature": 0.7
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.runtime_type, "llmcpp");
+        assert_eq!(
+            job.model_url,
+            Some("https://hf.co/model.gguf".to_string())
+        );
+        assert_eq!(job.model_context_size, Some(2048));
+        assert_eq!(job.model_temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_assign_job_runtime_type_diffusers() {
+        let j = json!({
+            "job_id": "j1",
+            "input": {},
+            "lease_expires": 0,
+            "runtime_type": "diffusers"
+        });
+        let job: AssignJob = serde_json::from_value(j).unwrap();
+        assert_eq!(job.runtime_type, "diffusers");
+    }
+
+    #[test]
+    fn test_assign_job_malformed_json() {
+        let result = serde_json::from_str::<AssignJob>("not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_assign_job_missing_required_field() {
+        // job_id is required
+        let j = json!({
+            "input": {},
+            "lease_expires": 0
+        });
+        let result = serde_json::from_value::<AssignJob>(j);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // 3. NATS URL credential parsing
+    // ========================================================================
+
+    #[test]
+    fn test_parse_nats_url_plain() {
+        let (url, creds) = parse_nats_url("nats://host:4222");
+        assert_eq!(url, "nats://host:4222");
+        assert!(creds.is_none());
+    }
+
+    #[test]
+    fn test_parse_nats_url_with_credentials() {
+        let (url, creds) = parse_nats_url("tls://user:pass@host:4222");
+        assert_eq!(url, "tls://host:4222");
+        let (user, pass) = creds.unwrap();
+        assert_eq!(user, "user");
+        assert_eq!(pass, "pass");
+    }
+
+    #[test]
+    fn test_parse_nats_url_no_scheme() {
+        let (url, creds) = parse_nats_url("host:4222");
+        assert_eq!(url, "host:4222");
+        assert!(creds.is_none());
+    }
+
+    #[test]
+    fn test_parse_nats_url_credentials_special_chars() {
+        let (url, creds) = parse_nats_url("nats://admin:p%40ss@sail.example.com:4222");
+        assert_eq!(url, "nats://sail.example.com:4222");
+        let (user, pass) = creds.unwrap();
+        assert_eq!(user, "admin");
+        assert_eq!(pass, "p%40ss");
+    }
+
+    // ========================================================================
+    // 4. Serialization round-trip tests
+    // ========================================================================
+
+    #[test]
+    fn test_register_host_serialization() {
+        let msg = RegisterHost {
+            host_id: "host-1".to_string(),
+            capabilities: HostCapabilities {
+                gpu_model: Some("RTX 4090".to_string()),
+                gpu_vram_mb: Some(24576),
+                cpu_cores: 16,
+                ram_mb: 65536,
+                region: Some("us-east".to_string()),
+            },
+            version: "0.1.0".to_string(),
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["host_id"], "host-1");
+        assert_eq!(v["capabilities"]["gpu_model"], "RTX 4090");
+        assert_eq!(v["capabilities"]["gpu_vram_mb"], 24576);
+        assert_eq!(v["capabilities"]["cpu_cores"], 16);
+        assert_eq!(v["capabilities"]["ram_mb"], 65536);
+        assert_eq!(v["capabilities"]["region"], "us-east");
+        assert_eq!(v["version"], "0.1.0");
+    }
+
+    #[test]
+    fn test_heartbeat_serialization() {
+        let msg = Heartbeat {
+            host_id: "h1".to_string(),
+            status: "online".to_string(),
+            active_jobs: 3,
+            timestamp: 1710000000000,
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["host_id"], "h1");
+        assert_eq!(v["status"], "online");
+        assert_eq!(v["active_jobs"], 3);
+        assert_eq!(v["timestamp"], 1710000000000_i64);
+    }
+
+    #[test]
+    fn test_enhanced_heartbeat_serialization_minimal() {
+        let msg = EnhancedHeartbeat {
+            host_id: "h1".to_string(),
+            status: "online".to_string(),
+            active_jobs: 0,
+            timestamp: 100,
+            agent_version: "0.1.0".to_string(),
+            system: None,
+            gpus: None,
+            active_job_metrics: None,
+            cache: None,
+            performance_estimates: None,
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["host_id"], "h1");
+        // Optional fields should be absent (skip_serializing_if = None)
+        assert!(v.get("system").is_none());
+        assert!(v.get("gpus").is_none());
+        assert!(v.get("cache").is_none());
+        assert!(v.get("performance_estimates").is_none());
+    }
+
+    #[test]
+    fn test_enhanced_heartbeat_serialization_full() {
+        let msg = EnhancedHeartbeat {
+            host_id: "h1".to_string(),
+            status: "online".to_string(),
+            active_jobs: 1,
+            timestamp: 100,
+            agent_version: "0.2.0".to_string(),
+            system: Some(SystemMetricsSnapshot {
+                cpu_percent: 45.5,
+                memory_used_mb: 8192,
+                memory_total_mb: 32768,
+                disk_used_gb: 100,
+                disk_total_gb: 500,
+            }),
+            gpus: Some(vec![GpuMetricsSnapshot {
+                index: 0,
+                utilization_percent: 80,
+                memory_used_mb: 12000,
+                memory_total_mb: 24576,
+                temperature_c: 72,
+                power_draw_w: 280.5,
+            }]),
+            active_job_metrics: Some(vec![ActiveJobMetrics {
+                job_id: "j1".to_string(),
+                job_type: "llm-chat".to_string(),
+                duration_ms: 5000,
+                tokens_generated: Some(150),
+                memory_mb: Some(4096),
+                gpu_memory_mb: Some(8000),
+            }]),
+            cache: Some(CacheMetricsSnapshot {
+                cached_image_count: 3,
+                cached_size_mb: 15000,
+                warm_workload_count: 2,
+                warm_workload_ids: vec!["w1".to_string(), "w2".to_string()],
+            }),
+            performance_estimates: Some(PerformanceEstimates {
+                gpu_bandwidth_gb_s: Some(1008.0),
+                estimated_llm_tok_s: Some(45.0),
+                max_concurrent_containers: Some(4),
+                wasm_memory_limit_mb: Some(256),
+                supported_runtimes: vec!["container".to_string(), "wasm".to_string()],
+                nats_rtt_ms: Some(12.5),
+                public_addr: Some("1.2.3.4:5678".to_string()),
+            }),
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["system"]["cpu_percent"], 45.5);
+        assert_eq!(v["gpus"][0]["utilization_percent"], 80);
+        assert_eq!(v["active_job_metrics"][0]["tokens_generated"], 150);
+        assert_eq!(v["cache"]["warm_workload_count"], 2);
+        assert_eq!(v["performance_estimates"]["nats_rtt_ms"], 12.5);
+    }
+
+    #[test]
+    fn test_job_status_serialization() {
+        let msg = JobStatus {
+            job_id: "j1".to_string(),
+            state: "running".to_string(),
+            error: None,
+            timestamp: 100,
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["job_id"], "j1");
+        assert_eq!(v["state"], "running");
+        // error should be absent when None
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn test_job_status_serialization_with_error() {
+        let msg = JobStatus {
+            job_id: "j1".to_string(),
+            state: "failed".to_string(),
+            error: Some("OOM killed".to_string()),
+            timestamp: 100,
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["error"], "OOM killed");
+    }
+
+    #[test]
+    fn test_job_output_serialization() {
+        let msg = JobOutput {
+            job_id: "j1".to_string(),
+            seq: 42,
+            chunk: "Hello world".to_string(),
+            is_final: false,
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["seq"], 42);
+        assert_eq!(v["chunk"], "Hello world");
+        assert_eq!(v["is_final"], false);
+    }
+
+    #[test]
+    fn test_cancel_job_deserialization() {
+        let j = json!({"job_id": "job-to-cancel"});
+        let cancel: CancelJob = serde_json::from_value(j).unwrap();
+        assert_eq!(cancel.job_id, "job-to-cancel");
+    }
+
+    #[test]
+    fn test_preload_recommendation_deserialization() {
+        let j = json!({
+            "type": "preload",
+            "workload_slug": "llm-chat",
+            "model_url": "https://hf.co/model.gguf",
+            "model_hash": "sha256:abc",
+            "runtime_type": "llmcpp",
+            "estimated_earnings_per_job": "0.05",
+            "queued_demand": 10,
+            "demand_score": 85,
+            "priority": "high"
+        });
+        let rec: PreloadRecommendation = serde_json::from_value(j).unwrap();
+        assert_eq!(rec.msg_type, Some("preload".to_string()));
+        assert_eq!(rec.workload_slug, "llm-chat");
+        assert_eq!(rec.runtime_type, "llmcpp");
+        assert_eq!(rec.queued_demand, Some(10));
+        assert_eq!(rec.priority, Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_preload_recommendation_minimal() {
+        let j = json!({
+            "workload_slug": "image-gen",
+            "runtime_type": "diffusers"
+        });
+        let rec: PreloadRecommendation = serde_json::from_value(j).unwrap();
+        assert_eq!(rec.workload_slug, "image-gen");
+        assert_eq!(rec.msg_type, None);
+        assert_eq!(rec.model_url, None);
+        assert_eq!(rec.estimated_earnings_per_job, None);
+    }
+
+    #[test]
+    fn test_pairing_request_serialization() {
+        let msg = PairingRequest {
+            host_id: "host-abc".to_string(),
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["host_id"], "host-abc");
+    }
+
+    #[test]
+    fn test_pairing_response_deserialization_success() {
+        let j = json!({
+            "success": true,
+            "code": "ABC-123",
+            "expires_in_seconds": 300,
+            "pair_url": "https://archipelag.io/pair/ABC-123"
+        });
+        let resp: PairingResponse = serde_json::from_value(j).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.code, Some("ABC-123".to_string()));
+        assert_eq!(resp.expires_in_seconds, Some(300));
+        assert_eq!(
+            resp.pair_url,
+            Some("https://archipelag.io/pair/ABC-123".to_string())
+        );
+        assert_eq!(resp.error, None);
+    }
+
+    #[test]
+    fn test_pairing_response_deserialization_error() {
+        let j = json!({
+            "success": false,
+            "error": "host not approved"
+        });
+        let resp: PairingResponse = serde_json::from_value(j).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.error, Some("host not approved".to_string()));
+        assert_eq!(resp.code, None);
+    }
 }
