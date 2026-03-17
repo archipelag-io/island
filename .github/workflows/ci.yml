@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    name: Build & Test
+    name: Build & Test (Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -49,3 +49,32 @@ jobs:
 
       - name: Build release
         run: cargo build --release --features diffusers
+
+  ci-windows:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build (default features)
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test
