@@ -200,7 +200,7 @@ pub async fn execute_training_job(
 ///
 /// LoRA gradient size: rank × (in_dim + out_dim) per adapted layer
 /// For rank=8, 32-layer model with 4096 hidden: ~2MB (vs ~14GB for full)
-fn compute_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
+pub(crate) fn compute_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
     if lora_available() {
         compute_lora_gradient(config, round)
     } else {
@@ -209,13 +209,13 @@ fn compute_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
 }
 
 /// Check if LoRA training is available in the current llama_cpp version
-fn lora_available() -> bool {
+pub(crate) fn lora_available() -> bool {
     // When llama_cpp_sys exposes llama_train_* functions, this returns true
     false
 }
 
 /// Simulated gradient for protocol testing
-fn compute_simulated_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
+pub(crate) fn compute_simulated_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
     let dim = 1024;
     let lr = config.config.learning_rate as f32;
 
@@ -234,7 +234,7 @@ fn compute_simulated_gradient(config: &TrainingConfig, round: u32) -> Vec<f32> {
 ///   llama_train_forward(ctx, adapter, batch) → loss
 ///   llama_train_backward(ctx, adapter) → updates adapter weights
 ///   llama_lora_get_weights(adapter) → weight data
-fn compute_lora_gradient(_config: &TrainingConfig, _round: u32) -> Vec<f32> {
+pub(crate) fn compute_lora_gradient(_config: &TrainingConfig, _round: u32) -> Vec<f32> {
     // Placeholder — will be replaced with actual LoRA training:
     //
     // unsafe {
@@ -253,17 +253,48 @@ fn compute_lora_gradient(_config: &TrainingConfig, _round: u32) -> Vec<f32> {
 }
 
 /// Encode gradient as base64 for JSON transport
-fn base64_encode_gradient(gradient: &[f32]) -> String {
+pub(crate) fn base64_encode_gradient(gradient: &[f32]) -> String {
+    use base64::Engine;
     let bytes: Vec<u8> = gradient.iter().flat_map(|f| f.to_le_bytes()).collect();
-    base64::encode(&bytes)
+    base64::engine::general_purpose::STANDARD.encode(&bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+
+    fn make_config(lr: f64, batch_size: u32, local_epochs: u32) -> TrainingConfig {
+        TrainingConfig {
+            session_id: "test-session".into(),
+            total_rounds: 5,
+            config: TrainingParams {
+                algorithm: "fed_avg".into(),
+                local_epochs,
+                learning_rate: lr,
+                batch_size,
+                dp_sigma: 0.0,
+            },
+            subjects: TrainingSubjects {
+                control: "fed.test.control".into(),
+                gradient: "fed.test.gradient".into(),
+                aggregate: "fed.test.aggregate".into(),
+                status: "fed.test.status".into(),
+            },
+        }
+    }
+
+    fn decode_gradient(encoded: &str) -> Vec<f32> {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        bytes.chunks(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    // ── TrainingConfig deserialization ─────────────────────────────
 
     #[test]
-    fn test_training_config_deserialize() {
+    fn test_training_config_deserialize_full() {
         let json = r#"{
             "session_id": "abc-123",
             "total_rounds": 10,
@@ -271,7 +302,8 @@ mod tests {
                 "algorithm": "fed_avg",
                 "local_epochs": 3,
                 "learning_rate": 0.001,
-                "batch_size": 32
+                "batch_size": 32,
+                "dp_sigma": 0.5
             },
             "subjects": {
                 "control": "fed.abc-123.control",
@@ -285,44 +317,230 @@ mod tests {
         assert_eq!(config.session_id, "abc-123");
         assert_eq!(config.total_rounds, 10);
         assert_eq!(config.config.local_epochs, 3);
+        assert!((config.config.learning_rate - 0.001).abs() < 1e-10);
+        assert_eq!(config.config.batch_size, 32);
+        assert!((config.config.dp_sigma - 0.5).abs() < 1e-10);
+        assert_eq!(config.subjects.control, "fed.abc-123.control");
     }
 
     #[test]
-    fn test_gradient_computation() {
-        let config = TrainingConfig {
-            session_id: "test".into(),
-            total_rounds: 5,
-            config: TrainingParams {
-                algorithm: "fed_avg".into(),
-                local_epochs: 3,
-                learning_rate: 0.001,
-                batch_size: 32,
-                dp_sigma: 0.0,
-            },
-            subjects: TrainingSubjects {
-                control: "test".into(),
-                gradient: "test".into(),
-                aggregate: "test".into(),
-                status: "test".into(),
-            },
-        };
+    fn test_training_config_deserialize_defaults() {
+        // Omit all fields with defaults in TrainingParams
+        let json = r#"{
+            "session_id": "defaults-test",
+            "total_rounds": 1,
+            "config": {},
+            "subjects": {
+                "control": "c",
+                "gradient": "g",
+                "aggregate": "a",
+                "status": "s"
+            }
+        }"#;
 
+        let config: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.config.algorithm, "fed_avg");
+        assert_eq!(config.config.local_epochs, 3);
+        assert!((config.config.learning_rate - 0.001).abs() < 1e-10);
+        assert_eq!(config.config.batch_size, 32);
+        assert!((config.config.dp_sigma - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_training_config_roundtrip() {
+        let config = make_config(0.01, 64, 5);
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: TrainingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.session_id, config.session_id);
+        assert_eq!(decoded.total_rounds, config.total_rounds);
+        assert_eq!(decoded.config.batch_size, 64);
+        assert_eq!(decoded.config.local_epochs, 5);
+        assert!((decoded.config.learning_rate - 0.01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_training_params_partial_override() {
+        // Override only some fields, rest get defaults
+        let json = r#"{
+            "session_id": "partial",
+            "total_rounds": 3,
+            "config": {
+                "learning_rate": 0.01
+            },
+            "subjects": {
+                "control": "c", "gradient": "g", "aggregate": "a", "status": "s"
+            }
+        }"#;
+
+        let config: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert!((config.config.learning_rate - 0.01).abs() < 1e-10);
+        // Defaults for the rest
+        assert_eq!(config.config.algorithm, "fed_avg");
+        assert_eq!(config.config.local_epochs, 3);
+        assert_eq!(config.config.batch_size, 32);
+    }
+
+    // ── lora_available ────────────────────────────────────────────
+
+    #[test]
+    fn test_lora_available_returns_false() {
+        // LoRA is not yet supported; this should always be false
+        assert!(!lora_available());
+    }
+
+    // ── compute_gradient dispatch ─────────────────────────────────
+
+    #[test]
+    fn test_compute_gradient_uses_simulated() {
+        // Since lora_available() is false, compute_gradient should equal compute_simulated_gradient
+        let config = make_config(0.001, 32, 3);
         let gradient = compute_gradient(&config, 1);
+        let simulated = compute_simulated_gradient(&config, 1);
+        assert_eq!(gradient, simulated);
+    }
+
+    // ── compute_simulated_gradient ────────────────────────────────
+
+    #[test]
+    fn test_simulated_gradient_length() {
+        let config = make_config(0.001, 32, 3);
+        let gradient = compute_simulated_gradient(&config, 1);
         assert_eq!(gradient.len(), 1024);
-        assert!(gradient.iter().all(|g| g.abs() < 0.1));
     }
 
     #[test]
-    fn test_gradient_encode_decode() {
+    fn test_simulated_gradient_deterministic() {
+        let config = make_config(0.001, 32, 3);
+        let g1 = compute_simulated_gradient(&config, 1);
+        let g2 = compute_simulated_gradient(&config, 1);
+        assert_eq!(g1, g2, "same config + round should produce identical gradients");
+    }
+
+    #[test]
+    fn test_simulated_gradient_varies_by_round() {
+        let config = make_config(0.001, 32, 3);
+        let g1 = compute_simulated_gradient(&config, 1);
+        let g2 = compute_simulated_gradient(&config, 2);
+        assert_ne!(g1, g2, "different rounds should produce different gradients");
+    }
+
+    #[test]
+    fn test_simulated_gradient_scales_with_learning_rate() {
+        let config_low = make_config(0.001, 32, 3);
+        let config_high = make_config(0.01, 32, 3);
+
+        let g_low = compute_simulated_gradient(&config_low, 1);
+        let g_high = compute_simulated_gradient(&config_high, 1);
+
+        let mag_low: f32 = g_low.iter().map(|g| g.abs()).sum();
+        let mag_high: f32 = g_high.iter().map(|g| g.abs()).sum();
+
+        // Higher learning rate should produce larger magnitude gradients
+        assert!(mag_high > mag_low, "higher lr should produce larger gradient magnitude");
+
+        // The gradient is lr * 0.01 * sin(...), so ratio should be ~10x
+        let ratio = mag_high / mag_low;
+        assert!((ratio - 10.0).abs() < 0.01, "magnitude ratio should be ~10x, got {}", ratio);
+    }
+
+    #[test]
+    fn test_simulated_gradient_bounded() {
+        let config = make_config(0.001, 32, 3);
+        let gradient = compute_simulated_gradient(&config, 1);
+        // Each element is sin(...) * lr * 0.01, so bounded by lr * 0.01
+        let bound = 0.001 * 0.01 + 1e-10;
+        assert!(gradient.iter().all(|g| g.abs() <= bound as f32),
+            "gradient values should be bounded by lr * 0.01");
+    }
+
+    #[test]
+    fn test_simulated_gradient_all_finite() {
+        let config = make_config(0.001, 32, 3);
+        for round in 0..10 {
+            let gradient = compute_simulated_gradient(&config, round);
+            assert!(gradient.iter().all(|g| g.is_finite()),
+                "all gradient values must be finite for round {}", round);
+        }
+    }
+
+    // ── compute_lora_gradient (stub) ──────────────────────────────
+
+    #[test]
+    fn test_lora_gradient_is_zeros() {
+        let config = make_config(0.001, 32, 3);
+        let gradient = compute_lora_gradient(&config, 1);
+        assert_eq!(gradient.len(), 1024);
+        assert!(gradient.iter().all(|g| *g == 0.0), "stub should return all zeros");
+    }
+
+    // ── base64_encode_gradient ────────────────────────────────────
+
+    #[test]
+    fn test_gradient_encode_decode_roundtrip() {
         let gradient = vec![1.0f32, 2.0, 3.0, -1.5];
         let encoded = base64_encode_gradient(&gradient);
-        assert!(!encoded.is_empty());
-
-        // Decode
-        let bytes = base64::decode(&encoded).unwrap();
-        let decoded: Vec<f32> = bytes.chunks(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let decoded = decode_gradient(&encoded);
         assert_eq!(decoded, gradient);
+    }
+
+    #[test]
+    fn test_gradient_encode_empty() {
+        let gradient: Vec<f32> = vec![];
+        let encoded = base64_encode_gradient(&gradient);
+        let decoded = decode_gradient(&encoded);
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_gradient_encode_single_value() {
+        let gradient = vec![42.0f32];
+        let encoded = base64_encode_gradient(&gradient);
+        let decoded = decode_gradient(&encoded);
+        assert_eq!(decoded, vec![42.0f32]);
+    }
+
+    #[test]
+    fn test_gradient_encode_special_values() {
+        let gradient = vec![0.0f32, -0.0, f32::MIN, f32::MAX];
+        let encoded = base64_encode_gradient(&gradient);
+        let decoded = decode_gradient(&encoded);
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded[2], f32::MIN);
+        assert_eq!(decoded[3], f32::MAX);
+    }
+
+    #[test]
+    fn test_gradient_encode_large_vector() {
+        let gradient: Vec<f32> = (0..1024).map(|i| i as f32 * 0.001).collect();
+        let encoded = base64_encode_gradient(&gradient);
+        let decoded = decode_gradient(&encoded);
+        assert_eq!(decoded.len(), 1024);
+        assert_eq!(decoded, gradient);
+    }
+
+    #[test]
+    fn test_gradient_encode_byte_length() {
+        let gradient = vec![1.0f32, 2.0, 3.0];
+        let encoded = base64_encode_gradient(&gradient);
+        // 3 floats * 4 bytes = 12 bytes, base64 of 12 bytes = 16 chars
+        let decoded_bytes = base64::engine::general_purpose::STANDARD.decode(&encoded).unwrap();
+        assert_eq!(decoded_bytes.len(), 12);
+    }
+
+    // ── TrainingSubjects ──────────────────────────────────────────
+
+    #[test]
+    fn test_training_subjects_serialize() {
+        let subjects = TrainingSubjects {
+            control: "fed.session1.control".into(),
+            gradient: "fed.session1.gradient".into(),
+            aggregate: "fed.session1.aggregate".into(),
+            status: "fed.session1.status".into(),
+        };
+        let json = serde_json::to_string(&subjects).unwrap();
+        assert!(json.contains("fed.session1.control"));
+        assert!(json.contains("fed.session1.gradient"));
+        assert!(json.contains("fed.session1.aggregate"));
+        assert!(json.contains("fed.session1.status"));
     }
 }

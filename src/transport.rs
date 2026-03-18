@@ -340,6 +340,8 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 mod tests {
     use super::*;
 
+    // ── TransportMode ──────────────────────────────────────────────────
+
     #[test]
     fn test_transport_mode_default() {
         assert_eq!(TransportMode::default(), TransportMode::Nats);
@@ -355,6 +357,48 @@ mod tests {
     }
 
     #[test]
+    fn test_transport_mode_deserialize_quic_with_relay() {
+        let mode: TransportMode = serde_json::from_str(r#""quic_with_relay""#).unwrap();
+        assert_eq!(mode, TransportMode::QuicWithRelay);
+    }
+
+    #[test]
+    fn test_transport_mode_serialize_roundtrip() {
+        for mode in [TransportMode::Nats, TransportMode::Quic, TransportMode::QuicWithRelay] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let restored: TransportMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, restored);
+        }
+    }
+
+    #[test]
+    fn test_transport_mode_serialize_snake_case() {
+        let json = serde_json::to_string(&TransportMode::QuicWithRelay).unwrap();
+        assert_eq!(json, r#""quic_with_relay""#);
+
+        let json = serde_json::to_string(&TransportMode::Nats).unwrap();
+        assert_eq!(json, r#""nats""#);
+
+        let json = serde_json::to_string(&TransportMode::Quic).unwrap();
+        assert_eq!(json, r#""quic""#);
+    }
+
+    #[test]
+    fn test_transport_mode_invalid_value() {
+        let result: Result<TransportMode, _> = serde_json::from_str(r#""tcp""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transport_mode_clone() {
+        let mode = TransportMode::QuicWithRelay;
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    // ── PeerInfo ───────────────────────────────────────────────────────
+
+    #[test]
     fn test_peer_info_deserialize() {
         let json = r#"{
             "host_id": "abc-123",
@@ -368,14 +412,188 @@ mod tests {
     }
 
     #[test]
+    fn test_peer_info_defaults_when_optional_fields_missing() {
+        let json = r#"{"host_id": "host-1"}"#;
+        let peer: PeerInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(peer.host_id, "host-1");
+        assert_eq!(peer.address, None);
+        assert_eq!(peer.mode, TransportMode::Nats); // default
+    }
+
+    #[test]
+    fn test_peer_info_with_ipv6_address() {
+        let json = r#"{
+            "host_id": "ipv6-host",
+            "address": "[::1]:9000",
+            "mode": "quic"
+        }"#;
+        let peer: PeerInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(peer.address, Some("[::1]:9000".into()));
+    }
+
+    #[test]
+    fn test_peer_info_roundtrip() {
+        let original = PeerInfo {
+            host_id: "test-island-42".into(),
+            address: Some("10.0.0.1:8443".into()),
+            mode: TransportMode::QuicWithRelay,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PeerInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.host_id, "test-island-42");
+        assert_eq!(restored.address, Some("10.0.0.1:8443".into()));
+        assert_eq!(restored.mode, TransportMode::QuicWithRelay);
+    }
+
+    #[test]
+    fn test_peer_info_missing_host_id_fails() {
+        let json = r#"{"address": "1.2.3.4:9000"}"#;
+        let result: Result<PeerInfo, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── TransportSender ────────────────────────────────────────────────
+
+    #[test]
     fn test_nats_sender_mode() {
         let sender = TransportSender::nats("ring.test.activate.1".into());
         assert_eq!(sender.mode(), TransportMode::Nats);
     }
 
     #[test]
+    fn test_quic_sender_mode() {
+        let (tx, _rx) = mpsc::channel(1);
+        let sender = TransportSender::Quic { tx };
+        assert_eq!(sender.mode(), TransportMode::Quic);
+    }
+
+    #[test]
+    fn test_nats_sender_factory() {
+        let subject = "ring.pipeline.activate.3".to_string();
+        let sender = TransportSender::nats(subject.clone());
+        match &sender {
+            TransportSender::Nats { subject: s } => assert_eq!(s, &subject),
+            _ => panic!("Expected Nats variant"),
+        }
+    }
+
+    // ── TransportStats ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_transport_stats_default() {
+        let stats = TransportStats::default();
+        assert_eq!(stats.nats_messages, 0);
+        assert_eq!(stats.quic_messages, 0);
+        assert!(!stats.relay_active);
+        assert!(stats.relay_reason.is_none());
+    }
+
+    #[test]
+    fn test_transport_stats_serialize() {
+        let stats = TransportStats {
+            nats_messages: 100,
+            quic_messages: 50,
+            relay_active: true,
+            relay_reason: Some("symmetric NAT detected".into()),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("\"nats_messages\":100"));
+        assert!(json.contains("\"quic_messages\":50"));
+        assert!(json.contains("\"relay_active\":true"));
+        assert!(json.contains("symmetric NAT detected"));
+    }
+
+    #[test]
+    fn test_transport_stats_clone() {
+        let stats = TransportStats {
+            nats_messages: 10,
+            quic_messages: 20,
+            relay_active: false,
+            relay_reason: None,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.nats_messages, 10);
+        assert_eq!(cloned.quic_messages, 20);
+    }
+
+    // ── Certificate generation ─────────────────────────────────────────
+
+    #[test]
     fn test_self_signed_cert_generation() {
         let result = generate_self_signed_cert();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_self_signed_cert_produces_non_empty_data() {
+        let (cert_der, key_der) = generate_self_signed_cert().unwrap();
+        assert!(!cert_der.is_empty(), "Certificate DER should not be empty");
+        match &key_der {
+            rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8) => {
+                assert!(!pkcs8.secret_pkcs8_der().is_empty(), "Private key should not be empty");
+            }
+            _ => panic!("Expected PKCS8 key format"),
+        }
+    }
+
+    #[test]
+    fn test_self_signed_cert_generates_unique_keys() {
+        let (_, key1) = generate_self_signed_cert().unwrap();
+        let (_, key2) = generate_self_signed_cert().unwrap();
+        // Two calls should produce different keys (different random material)
+        let k1_bytes = match &key1 {
+            rustls::pki_types::PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
+            _ => panic!("Expected PKCS8"),
+        };
+        let k2_bytes = match &key2 {
+            rustls::pki_types::PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
+            _ => panic!("Expected PKCS8"),
+        };
+        assert_ne!(k1_bytes, k2_bytes, "Each cert generation should produce unique keys");
+    }
+
+    // ── Address parsing (used internally by create_quic_sender/listener) ──
+
+    #[test]
+    fn test_socket_addr_parsing_ipv4() {
+        let addr: Result<SocketAddr, _> = "192.168.1.100:9000".parse();
+        assert!(addr.is_ok());
+        let addr = addr.unwrap();
+        assert_eq!(addr.port(), 9000);
+    }
+
+    #[test]
+    fn test_socket_addr_parsing_ipv6() {
+        let addr: Result<SocketAddr, _> = "[::1]:4433".parse();
+        assert!(addr.is_ok());
+        let addr = addr.unwrap();
+        assert_eq!(addr.port(), 4433);
+        assert!(addr.is_ipv6());
+    }
+
+    #[test]
+    fn test_socket_addr_parsing_invalid() {
+        let addr: Result<SocketAddr, _> = "not-an-address".parse();
+        assert!(addr.is_err());
+    }
+
+    #[test]
+    fn test_socket_addr_parsing_missing_port() {
+        let addr: Result<SocketAddr, _> = "192.168.1.1".parse();
+        assert!(addr.is_err());
+    }
+
+    // ── SkipServerVerification ─────────────────────────────────────────
+
+    #[test]
+    fn test_skip_server_verification_supported_schemes() {
+        use rustls::client::danger::ServerCertVerifier;
+        let verifier = SkipServerVerification;
+        let schemes = verifier.supported_verify_schemes();
+        assert!(!schemes.is_empty());
+        assert!(schemes.contains(&rustls::SignatureScheme::ECDSA_NISTP256_SHA256));
+        assert!(schemes.contains(&rustls::SignatureScheme::ED25519));
+        assert!(schemes.contains(&rustls::SignatureScheme::RSA_PSS_SHA256));
+        assert_eq!(schemes.len(), 6);
     }
 }

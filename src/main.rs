@@ -17,7 +17,7 @@ mod expert;
 mod gating;
 #[cfg(feature = "gguf")]
 mod gguf;
-#[cfg(feature = "pipeline")]
+#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 mod gguf_format;
 mod messages;
 #[allow(dead_code)]

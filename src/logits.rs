@@ -170,6 +170,25 @@ pub fn acceptance_rate(result: &VerifyResult) -> f64 {
     }
 }
 
+/// Compute log-softmax: log_prob = logit[token] - log(sum(exp(logit)))
+///
+/// Uses the numerically stable form with max-subtraction to prevent overflow.
+/// Returns (log_prob_for_token, log_sum_exp).
+pub(crate) fn log_softmax(logits: &[f32], token_id: usize) -> (f32, f32) {
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let log_sum_exp = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+    (logits[token_id] - log_sum_exp, log_sum_exp)
+}
+
+/// Find the token with the highest logit value and return (token_id, log_prob).
+pub(crate) fn argmax_token(logits: &[f32], log_sum_exp: f32) -> (i32, f32) {
+    logits.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(idx, &logit)| (idx as i32, logit - log_sum_exp))
+        .unwrap_or((0, 0.0))
+}
+
 /// Extract the log-probability of a specific token at a given position
 /// from an already-decoded context. Uses `llama_get_logits_ith`.
 ///
@@ -326,6 +345,8 @@ pub fn generate_draft_tokens_with_logprobs(
 mod tests {
     use super::*;
 
+    // ── DraftToken tests ──────────────────────────────────────────
+
     #[test]
     fn test_draft_token_serialize() {
         let token = DraftToken {
@@ -336,7 +357,49 @@ mod tests {
         let json = serde_json::to_string(&token).unwrap();
         assert!(json.contains("\"token_id\":42"));
         assert!(json.contains("\"log_prob\":-0.5"));
+        assert!(json.contains("\"text\":\"hello\""));
     }
+
+    #[test]
+    fn test_draft_token_roundtrip() {
+        let token = DraftToken {
+            token_id: 100,
+            text: "world".into(),
+            log_prob: -1.234,
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let decoded: DraftToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.token_id, 100);
+        assert_eq!(decoded.text, "world");
+        assert!((decoded.log_prob - (-1.234)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_draft_token_empty_text() {
+        let token = DraftToken {
+            token_id: 0,
+            text: String::new(),
+            log_prob: 0.0,
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let decoded: DraftToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.text, "");
+        assert_eq!(decoded.token_id, 0);
+    }
+
+    #[test]
+    fn test_draft_token_negative_token_id() {
+        let token = DraftToken {
+            token_id: -1,
+            text: "eos".into(),
+            log_prob: -0.01,
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let decoded: DraftToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.token_id, -1);
+    }
+
+    // ── VerifyResult tests ────────────────────────────────────────
 
     #[test]
     fn test_verify_result_serialize() {
@@ -352,22 +415,210 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"accepted_count\":3"));
         assert!(json.contains("\"draft_count\":5"));
+        assert!(json.contains("\"corrected_token\""));
     }
 
     #[test]
-    fn test_acceptance_rate() {
+    fn test_verify_result_no_correction() {
+        let result = VerifyResult {
+            accepted_count: 5,
+            corrected_token: None,
+            draft_count: 5,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"corrected_token\":null"));
+    }
+
+    #[test]
+    fn test_verify_result_roundtrip() {
+        let result = VerifyResult {
+            accepted_count: 2,
+            corrected_token: Some(DraftToken {
+                token_id: 7,
+                text: "token".into(),
+                log_prob: -2.5,
+            }),
+            draft_count: 4,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: VerifyResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.accepted_count, 2);
+        assert_eq!(decoded.draft_count, 4);
+        assert!(decoded.corrected_token.is_some());
+        let ct = decoded.corrected_token.unwrap();
+        assert_eq!(ct.token_id, 7);
+    }
+
+    // ── acceptance_rate tests ─────────────────────────────────────
+
+    #[test]
+    fn test_acceptance_rate_normal() {
         let result = VerifyResult {
             accepted_count: 4,
             corrected_token: None,
             draft_count: 5,
         };
         assert!((acceptance_rate(&result) - 0.8).abs() < f64::EPSILON);
+    }
 
+    #[test]
+    fn test_acceptance_rate_empty_draft() {
         let empty = VerifyResult {
             accepted_count: 0,
             corrected_token: None,
             draft_count: 0,
         };
         assert!((acceptance_rate(&empty) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_acceptance_rate_all_accepted() {
+        let result = VerifyResult {
+            accepted_count: 10,
+            corrected_token: None,
+            draft_count: 10,
+        };
+        assert!((acceptance_rate(&result) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_acceptance_rate_none_accepted() {
+        let result = VerifyResult {
+            accepted_count: 0,
+            corrected_token: Some(DraftToken {
+                token_id: 1,
+                text: "x".into(),
+                log_prob: -3.0,
+            }),
+            draft_count: 8,
+        };
+        assert!((acceptance_rate(&result) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_acceptance_rate_single_token() {
+        let result = VerifyResult {
+            accepted_count: 1,
+            corrected_token: None,
+            draft_count: 1,
+        };
+        assert!((acceptance_rate(&result) - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── log_softmax tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_log_softmax_uniform() {
+        // All equal logits: each token gets log(1/N) = -ln(N)
+        let logits = vec![1.0f32; 4];
+        let (log_prob, _) = log_softmax(&logits, 0);
+        let expected = -(4.0f32).ln();
+        assert!((log_prob - expected).abs() < 1e-5, "got {}, expected {}", log_prob, expected);
+    }
+
+    #[test]
+    fn test_log_softmax_dominant_token() {
+        // One very high logit should get log_prob close to 0
+        let logits = vec![100.0, 0.0, 0.0, 0.0];
+        let (log_prob, _) = log_softmax(&logits, 0);
+        assert!(log_prob > -0.001, "dominant token log_prob should be near 0, got {}", log_prob);
+    }
+
+    #[test]
+    fn test_log_softmax_low_token() {
+        // Token with low logit should get very negative log_prob
+        let logits = vec![100.0, 0.0, 0.0, 0.0];
+        let (log_prob, _) = log_softmax(&logits, 1);
+        assert!(log_prob < -50.0, "low token should have very negative log_prob, got {}", log_prob);
+    }
+
+    #[test]
+    fn test_log_softmax_probabilities_sum_to_one() {
+        let logits = vec![2.0, 1.0, 0.5, -1.0, 3.0];
+        let probs_sum: f32 = (0..logits.len())
+            .map(|i| log_softmax(&logits, i).0.exp())
+            .sum();
+        assert!((probs_sum - 1.0).abs() < 1e-5, "probabilities should sum to 1, got {}", probs_sum);
+    }
+
+    #[test]
+    fn test_log_softmax_negative_logits() {
+        let logits = vec![-10.0, -20.0, -5.0];
+        let (log_prob, _) = log_softmax(&logits, 2); // -5.0 is highest
+        // Should be the highest probability
+        let (log_prob_0, _) = log_softmax(&logits, 0);
+        let (log_prob_1, _) = log_softmax(&logits, 1);
+        assert!(log_prob > log_prob_0);
+        assert!(log_prob > log_prob_1);
+    }
+
+    #[test]
+    fn test_log_softmax_single_element() {
+        let logits = vec![5.0];
+        let (log_prob, _) = log_softmax(&logits, 0);
+        // Single element: probability is 1, log_prob is 0
+        assert!((log_prob - 0.0).abs() < 1e-5, "single element log_prob should be 0, got {}", log_prob);
+    }
+
+    #[test]
+    fn test_log_softmax_large_values_numerical_stability() {
+        // Very large logits should not overflow thanks to max-subtraction
+        let logits = vec![1000.0, 999.0, 998.0];
+        let (log_prob, _) = log_softmax(&logits, 0);
+        assert!(log_prob.is_finite(), "log_prob should be finite for large logits");
+        assert!(log_prob > -2.0 && log_prob <= 0.0);
+    }
+
+    #[test]
+    fn test_log_softmax_very_negative_values() {
+        let logits = vec![-1000.0, -999.0, -998.0];
+        let (log_prob, _) = log_softmax(&logits, 2); // -998 is highest
+        assert!(log_prob.is_finite(), "log_prob should be finite for very negative logits");
+    }
+
+    // ── argmax_token tests ────────────────────────────────────────
+
+    #[test]
+    fn test_argmax_token_basic() {
+        let logits = vec![1.0, 3.0, 2.0, 0.5];
+        let (_, lse) = log_softmax(&logits, 0);
+        let (token_id, log_prob) = argmax_token(&logits, lse);
+        assert_eq!(token_id, 1, "should pick index 1 (value 3.0)");
+        assert!((log_prob - (3.0 - lse)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_argmax_token_first_element() {
+        let logits = vec![10.0, 1.0, 2.0];
+        let (_, lse) = log_softmax(&logits, 0);
+        let (token_id, _) = argmax_token(&logits, lse);
+        assert_eq!(token_id, 0);
+    }
+
+    #[test]
+    fn test_argmax_token_last_element() {
+        let logits = vec![1.0, 2.0, 10.0];
+        let (_, lse) = log_softmax(&logits, 0);
+        let (token_id, _) = argmax_token(&logits, lse);
+        assert_eq!(token_id, 2);
+    }
+
+    #[test]
+    fn test_argmax_token_all_equal() {
+        // When all equal, should pick the first (max_by is stable for first max)
+        let logits = vec![1.0, 1.0, 1.0];
+        let (_, lse) = log_softmax(&logits, 0);
+        let (token_id, _) = argmax_token(&logits, lse);
+        // max_by returns last max with partial_cmp, but enumerate goes 0..N
+        // Actually, iter().enumerate().max_by picks the LAST one with equal values
+        assert!(token_id >= 0 && token_id <= 2);
+    }
+
+    #[test]
+    fn test_argmax_token_negative_logits() {
+        let logits = vec![-5.0, -1.0, -10.0];
+        let (_, lse) = log_softmax(&logits, 0);
+        let (token_id, _) = argmax_token(&logits, lse);
+        assert_eq!(token_id, 1, "should pick -1.0 as the highest");
     }
 }

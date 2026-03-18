@@ -381,4 +381,250 @@ mod tests {
         assert!(json.contains("\"strategy\":\"embedding\""));
         assert!(json.contains("\"expert_ids\":[0,3]"));
     }
+
+    // --- GatingStrategy tests ---
+
+    #[test]
+    fn test_gating_strategy_default_is_hash() {
+        assert_eq!(GatingStrategy::default(), GatingStrategy::Hash);
+    }
+
+    #[test]
+    fn test_gating_strategy_serde_roundtrip() {
+        let strategies = vec![GatingStrategy::Hash, GatingStrategy::Embedding, GatingStrategy::RoundRobin];
+        for s in strategies {
+            let json = serde_json::to_string(&s).unwrap();
+            let deserialized: GatingStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_gating_strategy_snake_case_names() {
+        assert_eq!(serde_json::to_string(&GatingStrategy::Hash).unwrap(), "\"hash\"");
+        assert_eq!(serde_json::to_string(&GatingStrategy::Embedding).unwrap(), "\"embedding\"");
+        assert_eq!(serde_json::to_string(&GatingStrategy::RoundRobin).unwrap(), "\"round_robin\"");
+    }
+
+    // --- cosine_similarity edge cases ---
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let v = vec![0.5, 0.5, 0.5];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty_vectors() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_lengths() {
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 0.0]), 0.0);
+    }
+
+    // --- Hash routing edge cases ---
+
+    #[test]
+    fn test_hash_routing_different_tokens_may_differ() {
+        let gate = ExpertGate::new(GatingStrategy::Hash, 8, 2);
+        let d1 = gate.route("apple", None);
+        let d2 = gate.route("banana", None);
+        // Both valid, both have 2 experts in range
+        assert_eq!(d1.expert_ids.len(), 2);
+        assert_eq!(d2.expert_ids.len(), 2);
+        assert!(d1.expert_ids.iter().all(|&e| e < 8));
+        assert!(d2.expert_ids.iter().all(|&e| e < 8));
+    }
+
+    #[test]
+    fn test_hash_routing_uniform_weights() {
+        let gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
+        let decision = gate.route("test", None);
+        assert_eq!(decision.weights.len(), 2);
+        assert!((decision.weights[0] - 0.5).abs() < 1e-6);
+        assert!((decision.weights[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hash_routing_single_active_expert() {
+        let gate = ExpertGate::new(GatingStrategy::Hash, 8, 1);
+        let decision = gate.route("hello", None);
+        assert_eq!(decision.expert_ids.len(), 1);
+        assert!((decision.weights[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hash_routing_all_experts_active() {
+        let gate = ExpertGate::new(GatingStrategy::Hash, 4, 4);
+        let decision = gate.route("test", None);
+        assert_eq!(decision.expert_ids.len(), 4);
+        // All 4 experts should appear (no duplicates)
+        let mut sorted = decision.expert_ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4);
+    }
+
+    // --- Round-robin edge cases ---
+
+    #[test]
+    fn test_round_robin_wraps_around() {
+        let gate = ExpertGate::new(GatingStrategy::RoundRobin, 3, 1);
+        let ids: Vec<u32> = (0..6).map(|_| gate.route("", None).expert_ids[0]).collect();
+        assert_eq!(ids, vec![0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn test_round_robin_uniform_weights() {
+        let gate = ExpertGate::new(GatingStrategy::RoundRobin, 4, 2);
+        let decision = gate.route("", None);
+        assert!((decision.weights[0] - 0.5).abs() < 1e-6);
+    }
+
+    // --- Embedding routing edge cases ---
+
+    #[test]
+    fn test_embedding_fallback_to_hash_without_centroids() {
+        let gate = ExpertGate::new(GatingStrategy::Embedding, 4, 2);
+        // No centroids set, should fall back to hash
+        let decision = gate.route("test", Some(&[1.0, 0.0, 0.0]));
+        assert_eq!(decision.strategy, GatingStrategy::Hash);
+    }
+
+    #[test]
+    fn test_embedding_fallback_when_no_embedding_provided() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
+        gate.set_centroids(vec![
+            vec![1.0, 0.0], vec![0.0, 1.0],
+            vec![-1.0, 0.0], vec![0.0, -1.0],
+        ]);
+        // Strategy is now Embedding, but no embedding provided → hash fallback
+        let decision = gate.route("test", None);
+        assert_eq!(decision.strategy, GatingStrategy::Hash);
+    }
+
+    #[test]
+    fn test_embedding_routing_weights_sum_to_one() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
+        gate.set_centroids(vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+            vec![1.0, 1.0, 0.0],
+        ]);
+        let decision = gate.route("", Some(&[0.5, 0.5, 0.0]));
+        let sum: f32 = decision.weights.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "Weights should sum to 1.0, got {}", sum);
+    }
+
+    // --- set_centroids side effect ---
+
+    #[test]
+    fn test_set_centroids_switches_strategy_to_embedding() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
+        assert_eq!(gate.strategy, GatingStrategy::Hash);
+        gate.set_centroids(vec![vec![1.0], vec![0.0]]);
+        assert_eq!(gate.strategy, GatingStrategy::Embedding);
+    }
+
+    #[test]
+    fn test_set_empty_centroids_keeps_strategy() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
+        gate.set_centroids(vec![]);
+        assert_eq!(gate.strategy, GatingStrategy::Hash);
+    }
+
+    // --- Native gating weights ---
+
+    #[test]
+    fn test_native_weights_take_priority_over_strategy() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 3, 2);
+        // Set up token lookup weights: token 'a' (97) → scores [1.0, 0.5, 0.1]
+        let mut weights_matrix = vec![vec![0.0; 3]; 128]; // 128 ASCII entries
+        weights_matrix[97] = vec![1.0, 0.5, 0.1]; // 'a' = 97
+        gate.set_native_weights(NativeGatingWeights {
+            weights: weights_matrix,
+            bias: None,
+            input_mode: GatingInputMode::TokenLookup,
+        });
+
+        let decision = gate.route("abc", None); // first byte = 'a' = 97
+        assert_eq!(decision.strategy, GatingStrategy::Embedding); // native uses Embedding strategy label
+        assert_eq!(decision.expert_ids[0], 0); // expert 0 has highest score
+    }
+
+    #[test]
+    fn test_native_weights_embedding_dot_with_bias() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 2, 1);
+        // 2D embeddings, 2 experts
+        // weights[dim][expert]: [[1.0, 0.0], [0.0, 1.0]]
+        gate.set_native_weights(NativeGatingWeights {
+            weights: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+            bias: Some(vec![0.0, 0.5]), // bias expert 1
+            input_mode: GatingInputMode::EmbeddingDot,
+        });
+
+        // embedding [1.0, 0.0] → scores: [1.0 + 0.0, 0.0 + 0.5] = [1.0, 0.5]
+        let decision = gate.route("x", Some(&[1.0, 0.0]));
+        assert_eq!(decision.expert_ids[0], 0);
+    }
+
+    // --- route_for_layer ---
+
+    #[test]
+    fn test_route_for_layer_uses_per_layer_weights() {
+        let mut gate = ExpertGate::new(GatingStrategy::Hash, 3, 1);
+
+        // Layer 0: expert 2 wins; Layer 1: expert 0 wins
+        let mut layer0_weights = vec![vec![0.0; 3]; 128];
+        layer0_weights[104] = vec![0.1, 0.2, 0.9]; // 'h' = 104
+        let mut layer1_weights = vec![vec![0.0; 3]; 128];
+        layer1_weights[104] = vec![0.9, 0.2, 0.1]; // 'h' = 104
+
+        let mut per_layer = std::collections::HashMap::new();
+        per_layer.insert(0, NativeGatingWeights {
+            weights: layer0_weights,
+            bias: None,
+            input_mode: GatingInputMode::TokenLookup,
+        });
+        per_layer.insert(1, NativeGatingWeights {
+            weights: layer1_weights,
+            bias: None,
+            input_mode: GatingInputMode::TokenLookup,
+        });
+        gate.set_per_layer_weights(per_layer);
+
+        let d0 = gate.route_for_layer("hi", None, 0);
+        assert_eq!(d0.expert_ids[0], 2);
+
+        let d1 = gate.route_for_layer("hi", None, 1);
+        assert_eq!(d1.expert_ids[0], 0);
+    }
+
+    #[test]
+    fn test_route_for_layer_falls_back_to_shared_route() {
+        let gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
+        // No per-layer weights set → falls back to shared route (hash)
+        let decision = gate.route_for_layer("test", None, 99);
+        assert_eq!(decision.strategy, GatingStrategy::Hash);
+        assert_eq!(decision.expert_ids.len(), 2);
+    }
+
+    // --- RoutingDecision deserialization ---
+
+    #[test]
+    fn test_routing_decision_deserialize() {
+        let json = r#"{"expert_ids":[1,2],"weights":[0.6,0.4],"strategy":"round_robin"}"#;
+        let decision: RoutingDecision = serde_json::from_str(json).unwrap();
+        assert_eq!(decision.expert_ids, vec![1, 2]);
+        assert_eq!(decision.strategy, GatingStrategy::RoundRobin);
+    }
 }

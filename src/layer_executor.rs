@@ -280,6 +280,8 @@ impl LayerExecutor for EmbeddingExecutor {
 mod tests {
     use super::*;
 
+    // ── LayerOutput serialization ──────────────────────────────────────
+
     #[test]
     fn test_layer_output_serialization() {
         let token = LayerOutput::Token { text: "hello".into(), seq: 1 };
@@ -299,6 +301,144 @@ mod tests {
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains("\"total_tokens\":42"));
     }
+
+    #[test]
+    fn test_layer_output_token_roundtrip() {
+        let original = LayerOutput::Token { text: "world".into(), seq: 99 };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Token { text, seq } => {
+                assert_eq!(text, "world");
+                assert_eq!(seq, 99);
+            }
+            _ => panic!("Expected Token variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_activation_roundtrip() {
+        // Encode two f32 values: 1.0 and -0.5
+        let floats: Vec<f32> = vec![1.0, -0.5];
+        let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        let original = LayerOutput::Activation {
+            data: bytes.clone(),
+            seq: 7,
+            n_embd: 2,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Activation { data, seq, n_embd } => {
+                assert_eq!(data, bytes);
+                assert_eq!(seq, 7);
+                assert_eq!(n_embd, 2);
+                // Verify we can decode the floats back
+                let decoded: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                assert_eq!(decoded, vec![1.0, -0.5]);
+            }
+            _ => panic!("Expected Activation variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_done_roundtrip() {
+        let original = LayerOutput::Done { total_tokens: 0 };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Done { total_tokens } => assert_eq!(total_tokens, 0),
+            _ => panic!("Expected Done variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_token_empty_text() {
+        let token = LayerOutput::Token { text: String::new(), seq: 0 };
+        let json = serde_json::to_string(&token).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Token { text, seq } => {
+                assert_eq!(text, "");
+                assert_eq!(seq, 0);
+            }
+            _ => panic!("Expected Token variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_token_unicode_text() {
+        let token = LayerOutput::Token { text: "Hello 🌍 世界".into(), seq: 5 };
+        let json = serde_json::to_string(&token).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Token { text, .. } => assert_eq!(text, "Hello 🌍 世界"),
+            _ => panic!("Expected Token variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_activation_empty_data() {
+        let activation = LayerOutput::Activation {
+            data: vec![],
+            seq: 1,
+            n_embd: 0,
+        };
+        let json = serde_json::to_string(&activation).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Activation { data, n_embd, .. } => {
+                assert!(data.is_empty());
+                assert_eq!(n_embd, 0);
+            }
+            _ => panic!("Expected Activation variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_done_large_token_count() {
+        let done = LayerOutput::Done { total_tokens: u64::MAX };
+        let json = serde_json::to_string(&done).unwrap();
+        let restored: LayerOutput = serde_json::from_str(&json).unwrap();
+        match restored {
+            LayerOutput::Done { total_tokens } => assert_eq!(total_tokens, u64::MAX),
+            _ => panic!("Expected Done variant"),
+        }
+    }
+
+    #[test]
+    fn test_layer_output_deserialization_invalid_type_fails() {
+        let json = r#"{"type":"Unknown","foo":"bar"}"#;
+        let result: Result<LayerOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_layer_output_clone() {
+        let original = LayerOutput::Activation {
+            data: vec![1, 2, 3, 4],
+            seq: 10,
+            n_embd: 1,
+        };
+        let cloned = original.clone();
+        match (&original, &cloned) {
+            (
+                LayerOutput::Activation { data: d1, seq: s1, n_embd: n1 },
+                LayerOutput::Activation { data: d2, seq: s2, n_embd: n2 },
+            ) => {
+                assert_eq!(d1, d2);
+                assert_eq!(s1, s2);
+                assert_eq!(n1, n2);
+            }
+            _ => panic!("Expected Activation variants"),
+        }
+    }
+
+    // ── Executor properties ────────────────────────────────────────────
 
     #[test]
     fn test_full_model_executor_properties() {
@@ -324,5 +464,58 @@ mod tests {
         };
         assert_eq!(exec.layer_range(), (16, 31));
         assert!(!exec.is_full_model());
+    }
+
+    #[test]
+    fn test_full_model_executor_single_layer() {
+        let exec = FullModelExecutor {
+            model_path: "/tmp/test.gguf".into(),
+            layer_start: 5,
+            layer_end: 5,
+            context_size: 512,
+            temperature: 0.0,
+            max_tokens: 1,
+        };
+        assert_eq!(exec.layer_range(), (5, 5));
+        assert!(exec.is_full_model());
+    }
+
+    #[test]
+    fn test_embedding_executor_single_layer() {
+        let exec = EmbeddingExecutor {
+            model_path: "/models/shard.gguf".into(),
+            layer_start: 0,
+            layer_end: 0,
+            context_size: 128,
+        };
+        assert_eq!(exec.layer_range(), (0, 0));
+        assert!(!exec.is_full_model());
+    }
+
+    // ── Activation byte encoding helpers ───────────────────────────────
+
+    #[test]
+    fn test_f32_le_byte_encoding_known_values() {
+        // Verify the encoding scheme used in EmbeddingExecutor for known IEEE 754 values
+        let values: Vec<f32> = vec![0.0, 1.0, -1.0, f32::INFINITY, f32::NEG_INFINITY];
+        let encoded: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();
+        assert_eq!(encoded.len(), 20); // 5 floats * 4 bytes
+
+        let decoded: Vec<f32> = encoded
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(decoded[0], 0.0);
+        assert_eq!(decoded[1], 1.0);
+        assert_eq!(decoded[2], -1.0);
+        assert!(decoded[3].is_infinite() && decoded[3] > 0.0);
+        assert!(decoded[4].is_infinite() && decoded[4] < 0.0);
+    }
+
+    #[test]
+    fn test_f32_le_byte_encoding_nan_preserved() {
+        let nan_bytes: Vec<u8> = f32::NAN.to_le_bytes().to_vec();
+        let decoded = f32::from_le_bytes(nan_bytes.try_into().unwrap());
+        assert!(decoded.is_nan());
     }
 }

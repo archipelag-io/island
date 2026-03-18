@@ -168,7 +168,7 @@ pub fn parse_gguf(path: &Path) -> Result<GgufFile> {
     }
 
     // Data offset is the current position, aligned
-    let header_end = file.stream_position()? as u64;
+    let header_end = file.stream_position()?;
     let data_offset = align_offset(header_end, alignment);
 
     // Compute tensor data sizes and assign layer IDs
@@ -199,7 +199,7 @@ pub fn split_by_layers(
     shard_count: usize,
     output_dir: &Path,
 ) -> Result<PathBuf> {
-    if shard_count < 2 || shard_count > 16 {
+    if !(2..=16).contains(&shard_count) {
         anyhow::bail!("Shard count must be 2–16");
     }
 
@@ -552,7 +552,7 @@ fn read_tensor_info(f: &mut std::fs::File) -> Result<TensorInfo> {
 
 fn align_offset(offset: u64, alignment: usize) -> u64 {
     let a = alignment as u64;
-    (offset + a - 1) / a * a
+    offset.div_ceil(a) * a
 }
 
 // ============================================================================
@@ -562,28 +562,28 @@ fn align_offset(offset: u64, alignment: usize) -> u64 {
 fn write_u32_hashed(f: &mut std::fs::File, h: &mut Sha256, v: u32) -> Result<()> {
     let bytes = v.to_le_bytes();
     f.write_all(&bytes)?;
-    h.update(&bytes);
+    h.update(bytes);
     Ok(())
 }
 
 fn write_i64_hashed(f: &mut std::fs::File, h: &mut Sha256, v: i64) -> Result<()> {
     let bytes = v.to_le_bytes();
     f.write_all(&bytes)?;
-    h.update(&bytes);
+    h.update(bytes);
     Ok(())
 }
 
 fn write_u64_hashed(f: &mut std::fs::File, h: &mut Sha256, v: u64) -> Result<()> {
     let bytes = v.to_le_bytes();
     f.write_all(&bytes)?;
-    h.update(&bytes);
+    h.update(bytes);
     Ok(())
 }
 
 fn write_string_hashed(f: &mut std::fs::File, h: &mut Sha256, s: &str) -> Result<()> {
     let len_bytes = (s.len() as u64).to_le_bytes();
     f.write_all(&len_bytes)?;
-    h.update(&len_bytes);
+    h.update(len_bytes);
     f.write_all(s.as_bytes())?;
     h.update(s.as_bytes());
     Ok(())
@@ -722,11 +722,11 @@ impl GatingWeightData {
         match self.data_type {
             0 => {
                 // F32: 4 bytes per element
-                for e in 0..n_exp {
-                    for h in 0..h_dim {
+                for (e, row) in matrix.iter_mut().enumerate() {
+                    for (h, cell) in row.iter_mut().enumerate() {
                         let offset = (e * h_dim + h) * 4;
                         if offset + 4 <= self.raw_data.len() {
-                            matrix[e][h] = f32::from_le_bytes([
+                            *cell = f32::from_le_bytes([
                                 self.raw_data[offset],
                                 self.raw_data[offset + 1],
                                 self.raw_data[offset + 2],
@@ -738,12 +738,12 @@ impl GatingWeightData {
             }
             1 => {
                 // F16: 2 bytes per element (convert to f32)
-                for e in 0..n_exp {
-                    for h in 0..h_dim {
+                for (e, row) in matrix.iter_mut().enumerate() {
+                    for (h, cell) in row.iter_mut().enumerate() {
                         let offset = (e * h_dim + h) * 2;
                         if offset + 2 <= self.raw_data.len() {
                             let half = u16::from_le_bytes([self.raw_data[offset], self.raw_data[offset + 1]]);
-                            matrix[e][h] = half_to_f32(half);
+                            *cell = half_to_f32(half);
                         }
                     }
                 }
@@ -929,5 +929,320 @@ mod tests {
         // Other KVs unchanged
         assert_eq!(rewritten[0].raw_bytes, kvs[0].raw_bytes);
         assert_eq!(rewritten[2].raw_bytes, kvs[2].raw_bytes);
+    }
+
+    // ========================================================================
+    // Additional tests
+    // ========================================================================
+
+    #[test]
+    fn test_ggml_type_size_all_known_types() {
+        // Verify all explicitly handled quantization types
+        assert_eq!(ggml_type_size(2), 0.5625);  // Q4_0
+        assert_eq!(ggml_type_size(3), 0.625);   // Q4_1
+        assert_eq!(ggml_type_size(6), 0.5625);  // Q5_0
+        assert_eq!(ggml_type_size(7), 0.625);   // Q5_1
+        assert_eq!(ggml_type_size(8), 1.0);     // Q8_0
+        assert_eq!(ggml_type_size(9), 1.0);     // Q8_1
+        assert_eq!(ggml_type_size(10), 0.5625); // Q2_K
+        assert_eq!(ggml_type_size(11), 0.625);  // Q3_K
+        assert_eq!(ggml_type_size(12), 0.5625); // Q4_K
+        assert_eq!(ggml_type_size(13), 0.6875); // Q5_K
+        assert_eq!(ggml_type_size(14), 0.8125); // Q6_K
+        assert_eq!(ggml_type_size(28), 2.0);    // BF16
+    }
+
+    #[test]
+    fn test_ggml_type_size_unknown_falls_back_to_f16() {
+        // Unknown types should fall back to f16 size (2.0)
+        assert_eq!(ggml_type_size(99), 2.0);
+        assert_eq!(ggml_type_size(255), 2.0);
+        assert_eq!(ggml_type_size(15), 2.0);
+    }
+
+    #[test]
+    fn test_compute_tensor_size_quantized() {
+        // Q4_0 (type 2): 0.5625 bytes per element
+        // 4096 elements * 0.5625 = 2304
+        assert_eq!(compute_tensor_size(&[4096], 2), 2304);
+    }
+
+    #[test]
+    fn test_compute_tensor_size_multidimensional() {
+        // 3D tensor: 2 x 3 x 4 = 24 elements, F32 = 96 bytes
+        assert_eq!(compute_tensor_size(&[2, 3, 4], 0), 96);
+    }
+
+    #[test]
+    fn test_compute_tensor_size_single_element() {
+        // 1 element, F32 = 4 bytes
+        assert_eq!(compute_tensor_size(&[1], 0), 4);
+        // 1 element, F16 = 2 bytes
+        assert_eq!(compute_tensor_size(&[1], 1), 2);
+    }
+
+    #[test]
+    fn test_extract_layer_id_high_layer_numbers() {
+        assert_eq!(extract_layer_id("blk.127.attn_q.weight"), Some(127));
+        assert_eq!(extract_layer_id("blk.999.ffn_down.weight"), Some(999));
+    }
+
+    #[test]
+    fn test_extract_layer_id_malformed_names() {
+        // Prefix matches but no valid number
+        assert_eq!(extract_layer_id("blk.abc.attn_q.weight"), None);
+        // Only "blk." with no following segment
+        assert_eq!(extract_layer_id("blk."), None);
+        // Empty string
+        assert_eq!(extract_layer_id(""), None);
+        // Similar prefix but not exact
+        assert_eq!(extract_layer_id("block.5.attn_q.weight"), None);
+    }
+
+    #[test]
+    fn test_tensor_placement_single_shard_gets_all_shared() {
+        // When a single shard covers all layers (0..31, total 32),
+        // it is both first and last, so all shared tensors are included
+        assert!(tensor_placement("token_embd.weight", 0, 31, 32));
+        assert!(tensor_placement("output.weight", 0, 31, 32));
+        assert!(tensor_placement("output_norm.weight", 0, 31, 32));
+        assert!(tensor_placement("rope_freqs.weight", 0, 31, 32));
+    }
+
+    #[test]
+    fn test_tensor_placement_unknown_shared_tensor_all_shards() {
+        // Unknown shared tensors should be included in every shard
+        assert!(tensor_placement("some_custom_tensor.weight", 0, 15, 32));
+        assert!(tensor_placement("some_custom_tensor.weight", 16, 31, 32));
+    }
+
+    #[test]
+    fn test_tensor_placement_rope_freqs_first_shard_only() {
+        assert!(tensor_placement("rope_freqs.weight", 0, 15, 32));
+        assert!(!tensor_placement("rope_freqs.weight", 16, 31, 32));
+    }
+
+    #[test]
+    fn test_tensor_placement_boundary_layer() {
+        // Layer exactly at boundary is included
+        assert!(tensor_placement("blk.15.attn_q.weight", 0, 15, 32));
+        // Layer one past boundary is excluded
+        assert!(!tensor_placement("blk.16.attn_q.weight", 0, 15, 32));
+        // Layer one before start is excluded
+        assert!(!tensor_placement("blk.15.attn_q.weight", 16, 31, 32));
+    }
+
+    #[test]
+    fn test_renumber_tensor_name_saturating_sub() {
+        // layer_start > layer_id should saturate to 0 (defensive)
+        assert_eq!(renumber_tensor_name("blk.5.attn_q.weight", 10), "blk.0.attn_q.weight");
+    }
+
+    #[test]
+    fn test_align_offset_alignment_one() {
+        // Alignment of 1 should return the offset unchanged
+        assert_eq!(align_offset(0, 1), 0);
+        assert_eq!(align_offset(7, 1), 7);
+        assert_eq!(align_offset(100, 1), 100);
+    }
+
+    #[test]
+    fn test_align_offset_large_alignment() {
+        assert_eq!(align_offset(0, 4096), 0);
+        assert_eq!(align_offset(1, 4096), 4096);
+        assert_eq!(align_offset(4095, 4096), 4096);
+        assert_eq!(align_offset(4096, 4096), 4096);
+        assert_eq!(align_offset(4097, 4096), 8192);
+    }
+
+    #[test]
+    fn test_half_to_f32_positive_infinity() {
+        // Positive infinity in f16 = 0x7C00
+        let inf = half_to_f32(0x7C00);
+        assert!(inf.is_infinite());
+        assert!(inf > 0.0);
+    }
+
+    #[test]
+    fn test_half_to_f32_negative_infinity() {
+        // Negative infinity in f16 = 0xFC00
+        let neg_inf = half_to_f32(0xFC00);
+        assert!(neg_inf.is_infinite());
+        assert!(neg_inf < 0.0);
+    }
+
+    #[test]
+    fn test_half_to_f32_nan() {
+        // NaN in f16 = 0x7C01 (exponent all 1s, mantissa non-zero)
+        let nan = half_to_f32(0x7C01);
+        assert!(nan.is_nan());
+    }
+
+    #[test]
+    fn test_half_to_f32_negative_zero() {
+        // Negative zero in f16 = 0x8000
+        let neg_zero = half_to_f32(0x8000);
+        assert_eq!(neg_zero, 0.0);
+        assert!(neg_zero.is_sign_negative());
+    }
+
+    #[test]
+    fn test_half_to_f32_small_values() {
+        // 0.5 in f16 = 0x3800
+        let half_val = half_to_f32(0x3800);
+        assert!((half_val - 0.5).abs() < 1e-3);
+
+        // 2.0 in f16 = 0x4000
+        let two = half_to_f32(0x4000);
+        assert!((two - 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_half_to_f32_denormalized() {
+        // Smallest positive denormalized f16 = 0x0001
+        let tiny = half_to_f32(0x0001);
+        assert!(tiny > 0.0);
+        assert!(tiny < 1e-4); // very small value
+    }
+
+    #[test]
+    fn test_gating_weight_data_to_f32_f16_input() {
+        // 1 expert x 2 hidden_dim, f16 format
+        // 1.0 in f16 = 0x3C00, 2.0 in f16 = 0x4000
+        let data: Vec<u8> = vec![
+            0x00, 0x3C, // 1.0
+            0x00, 0x40, // 2.0
+        ];
+
+        let gwd = GatingWeightData {
+            raw_data: data,
+            n_experts: 1,
+            hidden_dim: 2,
+            data_type: 1, // f16
+            layer_id: 0,
+        };
+
+        let matrix = gwd.to_f32_matrix();
+        assert_eq!(matrix.len(), 1);
+        assert!((matrix[0][0] - 1.0).abs() < 1e-3);
+        assert!((matrix[0][1] - 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_gating_weight_data_to_f32_unsupported_dtype() {
+        // Quantized type should produce zero matrix
+        let gwd = GatingWeightData {
+            raw_data: vec![0u8; 16],
+            n_experts: 2,
+            hidden_dim: 2,
+            data_type: 8, // Q8_0
+            layer_id: 0,
+        };
+
+        let matrix = gwd.to_f32_matrix();
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0], vec![0.0, 0.0]);
+        assert_eq!(matrix[1], vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_find_gating_tensors_empty() {
+        let gguf = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            kv_count: 0,
+            kv_pairs: vec![],
+            tensors: vec![],
+            data_offset: 0,
+            alignment: 32,
+        };
+
+        let gating = find_gating_tensors(&gguf);
+        assert!(gating.is_empty());
+    }
+
+    #[test]
+    fn test_find_gating_tensors_no_gating() {
+        let gguf = GgufFile {
+            version: 3,
+            tensor_count: 2,
+            kv_count: 0,
+            kv_pairs: vec![],
+            tensors: vec![
+                TensorInfo { name: "blk.0.attn_q.weight".into(), n_dims: 2, dims: vec![4096, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
+                TensorInfo { name: "blk.0.ffn_gate.weight".into(), n_dims: 2, dims: vec![4096, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
+            ],
+            data_offset: 0,
+            alignment: 32,
+        };
+
+        // ffn_gate (not ffn_gate_inp) should NOT be detected as a gating tensor
+        let gating = find_gating_tensors(&gguf);
+        assert!(gating.is_empty());
+    }
+
+    #[test]
+    fn test_rewrite_kv_pairs_no_block_count() {
+        let kvs = vec![
+            KvPair { key: "general.name".into(), value_type: 8, raw_bytes: vec![1, 0, 0, 0, 0, 0, 0, 0, b'x'] },
+        ];
+
+        let rewritten = rewrite_kv_pairs(&kvs, 8);
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].raw_bytes, kvs[0].raw_bytes);
+    }
+
+    #[test]
+    fn test_rewrite_kv_pairs_wrong_type_block_count() {
+        // block_count with wrong type (string instead of uint32) should NOT be rewritten
+        let kvs = vec![
+            KvPair { key: "llama.block_count".into(), value_type: 8, raw_bytes: vec![2, 0, 0, 0, 0, 0, 0, 0, b'3', b'2'] },
+        ];
+
+        let rewritten = rewrite_kv_pairs(&kvs, 8);
+        // Should be unchanged since type is 8 (string), not 4 (uint32)
+        assert_eq!(rewritten[0].raw_bytes, kvs[0].raw_bytes);
+    }
+
+    #[test]
+    fn test_build_manifest_structure() {
+        let shards = vec![
+            ShardManifestEntry {
+                index: 0,
+                filename: "model-shard-0.gguf".into(),
+                hash: "sha256:abc123".into(),
+                layer_start: 0,
+                layer_end: 15,
+                tensor_count: 100,
+            },
+            ShardManifestEntry {
+                index: 1,
+                filename: "model-shard-1.gguf".into(),
+                hash: "sha256:def456".into(),
+                layer_start: 16,
+                layer_end: 31,
+                tensor_count: 105,
+            },
+        ];
+
+        let manifest = build_manifest("test-model", 32, 2, &shards);
+
+        assert_eq!(manifest["total_layers"], 32);
+        assert_eq!(manifest["shard_count"], 2);
+        assert_eq!(manifest["min_shards"], 2);
+        assert_eq!(manifest["max_shards"], 2);
+        assert_eq!(manifest["model_name"], "test-model");
+        assert_eq!(manifest["layer_aware"], true);
+
+        // Check shard hashes
+        assert_eq!(manifest["shard_hashes"]["0"], "sha256:abc123");
+        assert_eq!(manifest["shard_hashes"]["1"], "sha256:def456");
+
+        // Check shard layers
+        assert_eq!(manifest["shard_layers"]["0"]["layer_start"], 0);
+        assert_eq!(manifest["shard_layers"]["0"]["layer_end"], 15);
+        assert_eq!(manifest["shard_layers"]["0"]["tensor_count"], 100);
+        assert_eq!(manifest["shard_layers"]["1"]["layer_start"], 16);
+        assert_eq!(manifest["shard_layers"]["1"]["layer_end"], 31);
     }
 }
