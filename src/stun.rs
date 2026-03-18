@@ -48,7 +48,10 @@ pub async fn discover_public_addr() -> Result<StunResult> {
     for server in DEFAULT_STUN_SERVERS {
         match probe_stun_server(server).await {
             Ok(result) => {
-                info!("STUN discovery: public address is {} (via {})", result.public_addr, server);
+                info!(
+                    "STUN discovery: public address is {} (via {})",
+                    result.public_addr, server
+                );
                 return Ok(result);
             }
             Err(e) => {
@@ -62,11 +65,13 @@ pub async fn discover_public_addr() -> Result<StunResult> {
 
 /// Send a STUN Binding Request and parse the response.
 async fn probe_stun_server(server: &str) -> Result<StunResult> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
         .context("Failed to bind UDP socket")?;
 
     // Resolve server address
-    let server_addr: SocketAddr = tokio::net::lookup_host(server).await
+    let server_addr: SocketAddr = tokio::net::lookup_host(server)
+        .await
         .context("STUN DNS lookup failed")?
         .next()
         .context("No addresses for STUN server")?;
@@ -75,18 +80,17 @@ async fn probe_stun_server(server: &str) -> Result<StunResult> {
     let transaction_id: [u8; 12] = rand::random();
     let request = build_binding_request(&transaction_id);
 
-    socket.send_to(&request, server_addr).await
+    socket
+        .send_to(&request, server_addr)
+        .await
         .context("Failed to send STUN request")?;
 
     // Wait for response (3 second timeout)
     let mut buf = [0u8; 256];
-    let n = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        socket.recv(&mut buf),
-    )
-    .await
-    .context("STUN response timeout")?
-    .context("Failed to receive STUN response")?;
+    let n = tokio::time::timeout(std::time::Duration::from_secs(3), socket.recv(&mut buf))
+        .await
+        .context("STUN response timeout")?
+        .context("Failed to receive STUN response")?;
 
     parse_binding_response(&buf[..n], &transaction_id, server)
 }
@@ -102,7 +106,11 @@ fn build_binding_request(transaction_id: &[u8; 12]) -> Vec<u8> {
 }
 
 /// Parse a STUN Binding Response and extract the mapped address
-fn parse_binding_response(data: &[u8], expected_txn: &[u8; 12], server: &str) -> Result<StunResult> {
+fn parse_binding_response(
+    data: &[u8],
+    expected_txn: &[u8; 12],
+    server: &str,
+) -> Result<StunResult> {
     if data.len() < 20 {
         anyhow::bail!("STUN response too short: {} bytes", data.len());
     }
@@ -135,11 +143,17 @@ fn parse_binding_response(data: &[u8], expected_txn: &[u8; 12], server: &str) ->
         match attr_type {
             XOR_MAPPED_ADDRESS => {
                 let addr = parse_xor_mapped_address(attr_data, expected_txn)?;
-                return Ok(StunResult { public_addr: addr, server: server.to_string() });
+                return Ok(StunResult {
+                    public_addr: addr,
+                    server: server.to_string(),
+                });
             }
             MAPPED_ADDRESS => {
                 let addr = parse_mapped_address(attr_data)?;
-                return Ok(StunResult { public_addr: addr, server: server.to_string() });
+                return Ok(StunResult {
+                    public_addr: addr,
+                    server: server.to_string(),
+                });
             }
             _ => {} // Skip unknown attributes
         }
@@ -231,13 +245,21 @@ mod tests {
         let xor_port = (3478u16 ^ (MAGIC_COOKIE >> 16) as u16).to_be_bytes();
 
         let data = [
-            0x00, 0x01, // reserved + IPv4
-            xor_port[0], xor_port[1],
-            xor_ip[0], xor_ip[1], xor_ip[2], xor_ip[3],
+            0x00,
+            0x01, // reserved + IPv4
+            xor_port[0],
+            xor_port[1],
+            xor_ip[0],
+            xor_ip[1],
+            xor_ip[2],
+            xor_ip[3],
         ];
 
         let addr = parse_xor_mapped_address(&data, &txn).unwrap();
-        assert_eq!(addr.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1)));
+        assert_eq!(
+            addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1))
+        );
         assert_eq!(addr.port(), 3478);
     }
 
@@ -251,9 +273,14 @@ mod tests {
         let xor_port = (9000u16 ^ (MAGIC_COOKIE >> 16) as u16).to_be_bytes();
 
         let attr_value = [
-            0x00, 0x01, // IPv4
-            xor_port[0], xor_port[1],
-            xor_ip[0], xor_ip[1], xor_ip[2], xor_ip[3],
+            0x00,
+            0x01, // IPv4
+            xor_port[0],
+            xor_port[1],
+            xor_ip[0],
+            xor_ip[1],
+            xor_ip[2],
+            xor_ip[3],
         ];
 
         let attr_type = XOR_MAPPED_ADDRESS.to_be_bytes();

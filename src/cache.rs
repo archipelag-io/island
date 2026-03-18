@@ -348,7 +348,10 @@ impl CacheManager {
         let excess = stats.cached_image_count - self.config.max_cached_images;
         let mut cache = self.cached_images.write().await;
         // Sort by last_used ascending (oldest first), remove oldest
-        let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.last_used)).collect();
+        let mut entries: Vec<_> = cache
+            .iter()
+            .map(|(k, v)| (k.clone(), v.last_used))
+            .collect();
         entries.sort_by_key(|(_, t)| *t);
         let to_remove: Vec<String> = entries.into_iter().take(excess).map(|(k, _)| k).collect();
         for key in &to_remove {

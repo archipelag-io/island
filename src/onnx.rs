@@ -36,7 +36,10 @@ pub async fn execute_onnx_job(
         .as_deref()
         .unwrap_or("text-classification");
 
-    info!("Executing ONNX workload: {} (task: {})", onnx_uri, task_type);
+    info!(
+        "Executing ONNX workload: {} (task: {})",
+        onnx_uri, task_type
+    );
 
     // Get model cache
     let model_cache = {
@@ -93,15 +96,25 @@ pub async fn execute_onnx_job(
     // Route to task-specific handler
     let mut session = session;
     let result = match task_type {
-        "text-classification" | "fill-mask" | "token-classification" | "zero-shot-classification" => {
+        "text-classification"
+        | "fill-mask"
+        | "token-classification"
+        | "zero-shot-classification" => {
             run_text_classification(&mut session, &job.input, tokenizer.as_ref())
         }
-        "feature-extraction" => run_feature_extraction(&mut session, &job.input, tokenizer.as_ref()),
+        "feature-extraction" => {
+            run_feature_extraction(&mut session, &job.input, tokenizer.as_ref())
+        }
         "object-detection" => run_object_detection(&mut session, &job.input),
         "image-segmentation" => run_image_segmentation(&mut session, &job.input),
-        "question-answering" => run_question_answering(&mut session, &job.input, tokenizer.as_ref()),
+        "question-answering" => {
+            run_question_answering(&mut session, &job.input, tokenizer.as_ref())
+        }
         other => {
-            warn!("ONNX task '{}' — attempting text-classification fallback", other);
+            warn!(
+                "ONNX task '{}' — attempting text-classification fallback",
+                other
+            );
             run_text_classification(&mut session, &job.input, tokenizer.as_ref())
         }
     };
@@ -153,16 +166,18 @@ fn tokenize_to_tensors(
     tokenizer: Option<&Tokenizer>,
     text: &str,
 ) -> Result<(Tensor<i64>, Tensor<i64>, usize)> {
-    let tokenizer = tokenizer.context(
-        "This task requires a tokenizer but none was loaded",
-    )?;
+    let tokenizer = tokenizer.context("This task requires a tokenizer but none was loaded")?;
 
     let encoding = tokenizer
         .encode(text, true)
         .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
     let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-    let mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&m| m as i64).collect();
+    let mask: Vec<i64> = encoding
+        .get_attention_mask()
+        .iter()
+        .map(|&m| m as i64)
+        .collect();
     let seq_len = ids.len();
 
     let ids_tensor = Tensor::from_array(([1, seq_len], ids))
@@ -231,13 +246,17 @@ fn run_feature_extraction(
         .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
     let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-    let mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&m| m as i64).collect();
+    let mask: Vec<i64> = encoding
+        .get_attention_mask()
+        .iter()
+        .map(|&m| m as i64)
+        .collect();
     let seq_len = ids.len();
 
-    let ids_tensor = Tensor::from_array(([1, seq_len], ids))
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mask_tensor = Tensor::from_array(([1, seq_len], mask.clone()))
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let ids_tensor =
+        Tensor::from_array(([1, seq_len], ids)).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mask_tensor =
+        Tensor::from_array(([1, seq_len], mask.clone())).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let outputs = session
         .run(ort::inputs![
@@ -318,11 +337,17 @@ fn run_object_detection(
 
     let mut detections = Vec::new();
     let stride = *shape.last().unwrap_or(&6) as usize;
-    let num_dets = if shape.len() >= 2 { shape[shape.len() - 2] as usize } else { data.len() / stride };
+    let num_dets = if shape.len() >= 2 {
+        shape[shape.len() - 2] as usize
+    } else {
+        data.len() / stride
+    };
 
     for i in 0..num_dets.min(1000) {
         let off = i * stride;
-        if off + 5 > data.len() { break; }
+        if off + 5 > data.len() {
+            break;
+        }
         let conf = data[off + 4];
         if conf >= threshold {
             detections.push(serde_json::json!({
@@ -360,7 +385,11 @@ fn run_image_segmentation(
     let (orig_w, orig_h) = (img.width(), img.height());
     let size = 640usize;
 
-    let resized = img.resize_exact(size as u32, size as u32, image::imageops::FilterType::Triangle);
+    let resized = img.resize_exact(
+        size as u32,
+        size as u32,
+        image::imageops::FilterType::Triangle,
+    );
     let rgb = resized.to_rgb8();
 
     let mut pixels = vec![0.0f32; 3 * size * size];
@@ -381,7 +410,11 @@ fn run_image_segmentation(
         .try_extract_tensor::<f32>()
         .map_err(|e| anyhow::anyhow!("Failed to extract output: {}", e))?;
 
-    let num_classes = if shape.len() >= 2 { shape[1] as usize } else { 1 };
+    let num_classes = if shape.len() >= 2 {
+        shape[1] as usize
+    } else {
+        1
+    };
 
     Ok(serde_json::json!({
         "output_shape": shape.iter().map(|&d| d as usize).collect::<Vec<_>>(),
@@ -397,9 +430,13 @@ fn run_question_answering(
     input: &serde_json::Value,
     tokenizer: Option<&Tokenizer>,
 ) -> Result<serde_json::Value> {
-    let question = input.get("question").and_then(|v| v.as_str())
+    let question = input
+        .get("question")
+        .and_then(|v| v.as_str())
         .context("question-answering requires 'question' field")?;
-    let context = input.get("context").and_then(|v| v.as_str())
+    let context = input
+        .get("context")
+        .and_then(|v| v.as_str())
         .context("question-answering requires 'context' field")?;
 
     let tokenizer = tokenizer.context("QA requires a tokenizer")?;
@@ -408,13 +445,17 @@ fn run_question_answering(
         .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
     let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-    let mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&m| m as i64).collect();
+    let mask: Vec<i64> = encoding
+        .get_attention_mask()
+        .iter()
+        .map(|&m| m as i64)
+        .collect();
     let seq_len = ids.len();
 
-    let ids_tensor = Tensor::from_array(([1, seq_len], ids))
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mask_tensor = Tensor::from_array(([1, seq_len], mask))
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let ids_tensor =
+        Tensor::from_array(([1, seq_len], ids)).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mask_tensor =
+        Tensor::from_array(([1, seq_len], mask)).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let outputs = session
         .run(ort::inputs![
@@ -423,9 +464,11 @@ fn run_question_answering(
         ])
         .map_err(|e| anyhow::anyhow!("Inference failed: {}", e))?;
 
-    let (_s1, start_logits) = outputs[0].try_extract_tensor::<f32>()
+    let (_s1, start_logits) = outputs[0]
+        .try_extract_tensor::<f32>()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let (_s2, end_logits) = outputs[1].try_extract_tensor::<f32>()
+    let (_s2, end_logits) = outputs[1]
+        .try_extract_tensor::<f32>()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let start_idx = argmax(&start_logits[..seq_len]);
@@ -443,7 +486,9 @@ fn run_question_answering(
 }
 
 fn softmax(logits: &[f32]) -> Vec<f32> {
-    if logits.is_empty() { return Vec::new(); }
+    if logits.is_empty() {
+        return Vec::new();
+    }
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
     let sum: f32 = exps.iter().sum();
@@ -451,7 +496,9 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate()
+    values
+        .iter()
+        .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap_or(0)

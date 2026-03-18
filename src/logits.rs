@@ -78,7 +78,8 @@ pub fn verify_draft_tokens(
             context_text.len() as i32,
             context_tokens.as_mut_ptr(),
             max_tokens,
-            true, false,
+            true,
+            false,
         );
 
         if n_context < 0 {
@@ -97,7 +98,8 @@ pub fn verify_draft_tokens(
         let batch = llama_cpp_sys::llama_batch_get_one(
             all_tokens.as_mut_ptr(),
             all_tokens.len() as i32,
-            0, 0,
+            0,
+            0,
         );
 
         let result = llama_cpp_sys::llama_decode(ctx, batch);
@@ -126,7 +128,12 @@ pub fn verify_draft_tokens(
 
             // Compute log-softmax for the draft token
             let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let log_sum_exp: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+            let log_sum_exp: f32 = logits
+                .iter()
+                .map(|&l| (l - max_logit).exp())
+                .sum::<f32>()
+                .ln()
+                + max_logit;
             let verifier_log_prob = logits[draft.token_id as usize] - log_sum_exp;
 
             // Accept if verifier agrees (log-prob above threshold)
@@ -135,7 +142,8 @@ pub fn verify_draft_tokens(
                 accepted_count += 1;
             } else {
                 // Find the verifier's preferred token at this position
-                let best_token = logits.iter()
+                let best_token = logits
+                    .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(idx, &logit)| (idx as i32, logit - log_sum_exp))
@@ -176,13 +184,19 @@ pub fn acceptance_rate(result: &VerifyResult) -> f64 {
 /// Returns (log_prob_for_token, log_sum_exp).
 pub(crate) fn log_softmax(logits: &[f32], token_id: usize) -> (f32, f32) {
     let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let log_sum_exp = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+    let log_sum_exp = logits
+        .iter()
+        .map(|&l| (l - max_logit).exp())
+        .sum::<f32>()
+        .ln()
+        + max_logit;
     (logits[token_id] - log_sum_exp, log_sum_exp)
 }
 
 /// Find the token with the highest logit value and return (token_id, log_prob).
 pub(crate) fn argmax_token(logits: &[f32], log_sum_exp: f32) -> (i32, f32) {
-    logits.iter()
+    logits
+        .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(idx, &logit)| (idx as i32, logit - log_sum_exp))
@@ -213,7 +227,12 @@ pub unsafe fn extract_token_log_prob(
 
     // Log-softmax: log_prob = logit[token] - log(sum(exp(logit)))
     let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let log_sum_exp = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+    let log_sum_exp = logits
+        .iter()
+        .map(|&l| (l - max_logit).exp())
+        .sum::<f32>()
+        .ln()
+        + max_logit;
     logits[token_id as usize] - log_sum_exp
 }
 
@@ -254,8 +273,13 @@ pub fn generate_draft_tokens_with_logprobs(
         let max_tok = context_size as i32;
         let mut tokens = vec![0i32; max_tok as usize];
         let n_ctx_tokens = llama_cpp_sys::llama_tokenize(
-            model, c_text.as_ptr(), context_text.len() as i32,
-            tokens.as_mut_ptr(), max_tok, true, false,
+            model,
+            c_text.as_ptr(),
+            context_text.len() as i32,
+            tokens.as_mut_ptr(),
+            max_tok,
+            true,
+            false,
         );
 
         if n_ctx_tokens < 0 {
@@ -266,9 +290,7 @@ pub fn generate_draft_tokens_with_logprobs(
         tokens.truncate(n_ctx_tokens as usize);
 
         // Decode context
-        let batch = llama_cpp_sys::llama_batch_get_one(
-            tokens.as_mut_ptr(), n_ctx_tokens, 0, 0,
-        );
+        let batch = llama_cpp_sys::llama_batch_get_one(tokens.as_mut_ptr(), n_ctx_tokens, 0, 0);
         if llama_cpp_sys::llama_decode(ctx, batch) != 0 {
             llama_cpp_sys::llama_free(ctx);
             llama_cpp_sys::llama_free_model(model);
@@ -290,10 +312,16 @@ pub fn generate_draft_tokens_with_logprobs(
 
             // Apply temperature and sample (greedy for simplicity)
             let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let log_sum_exp = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+            let log_sum_exp = logits
+                .iter()
+                .map(|&l| (l - max_logit).exp())
+                .sum::<f32>()
+                .ln()
+                + max_logit;
 
             // Find top token
-            let (best_id, best_logit) = logits.iter()
+            let (best_id, best_logit) = logits
+                .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, &l)| (idx as i32, l))
@@ -304,7 +332,10 @@ pub fn generate_draft_tokens_with_logprobs(
             // Convert token to text
             let mut buf = vec![0u8; 64];
             let text_len = llama_cpp_sys::llama_token_to_piece(
-                model, best_id, buf.as_mut_ptr() as *mut i8, buf.len() as i32,
+                model,
+                best_id,
+                buf.as_mut_ptr() as *mut i8,
+                buf.len() as i32,
             );
             let text = if text_len > 0 {
                 String::from_utf8_lossy(&buf[..text_len as usize]).to_string()
@@ -325,9 +356,8 @@ pub fn generate_draft_tokens_with_logprobs(
 
             // Decode the new token to advance the context
             let mut next_token = vec![best_id];
-            let next_batch = llama_cpp_sys::llama_batch_get_one(
-                next_token.as_mut_ptr(), 1, current_pos, 0,
-            );
+            let next_batch =
+                llama_cpp_sys::llama_batch_get_one(next_token.as_mut_ptr(), 1, current_pos, 0);
             if llama_cpp_sys::llama_decode(ctx, next_batch) != 0 {
                 break;
             }
@@ -513,7 +543,12 @@ mod tests {
         let logits = vec![1.0f32; 4];
         let (log_prob, _) = log_softmax(&logits, 0);
         let expected = -(4.0f32).ln();
-        assert!((log_prob - expected).abs() < 1e-5, "got {}, expected {}", log_prob, expected);
+        assert!(
+            (log_prob - expected).abs() < 1e-5,
+            "got {}, expected {}",
+            log_prob,
+            expected
+        );
     }
 
     #[test]
@@ -521,7 +556,11 @@ mod tests {
         // One very high logit should get log_prob close to 0
         let logits = vec![100.0, 0.0, 0.0, 0.0];
         let (log_prob, _) = log_softmax(&logits, 0);
-        assert!(log_prob > -0.001, "dominant token log_prob should be near 0, got {}", log_prob);
+        assert!(
+            log_prob > -0.001,
+            "dominant token log_prob should be near 0, got {}",
+            log_prob
+        );
     }
 
     #[test]
@@ -529,7 +568,11 @@ mod tests {
         // Token with low logit should get very negative log_prob
         let logits = vec![100.0, 0.0, 0.0, 0.0];
         let (log_prob, _) = log_softmax(&logits, 1);
-        assert!(log_prob < -50.0, "low token should have very negative log_prob, got {}", log_prob);
+        assert!(
+            log_prob < -50.0,
+            "low token should have very negative log_prob, got {}",
+            log_prob
+        );
     }
 
     #[test]
@@ -538,14 +581,18 @@ mod tests {
         let probs_sum: f32 = (0..logits.len())
             .map(|i| log_softmax(&logits, i).0.exp())
             .sum();
-        assert!((probs_sum - 1.0).abs() < 1e-5, "probabilities should sum to 1, got {}", probs_sum);
+        assert!(
+            (probs_sum - 1.0).abs() < 1e-5,
+            "probabilities should sum to 1, got {}",
+            probs_sum
+        );
     }
 
     #[test]
     fn test_log_softmax_negative_logits() {
         let logits = vec![-10.0, -20.0, -5.0];
         let (log_prob, _) = log_softmax(&logits, 2); // -5.0 is highest
-        // Should be the highest probability
+                                                     // Should be the highest probability
         let (log_prob_0, _) = log_softmax(&logits, 0);
         let (log_prob_1, _) = log_softmax(&logits, 1);
         assert!(log_prob > log_prob_0);
@@ -557,7 +604,11 @@ mod tests {
         let logits = vec![5.0];
         let (log_prob, _) = log_softmax(&logits, 0);
         // Single element: probability is 1, log_prob is 0
-        assert!((log_prob - 0.0).abs() < 1e-5, "single element log_prob should be 0, got {}", log_prob);
+        assert!(
+            (log_prob - 0.0).abs() < 1e-5,
+            "single element log_prob should be 0, got {}",
+            log_prob
+        );
     }
 
     #[test]
@@ -565,7 +616,10 @@ mod tests {
         // Very large logits should not overflow thanks to max-subtraction
         let logits = vec![1000.0, 999.0, 998.0];
         let (log_prob, _) = log_softmax(&logits, 0);
-        assert!(log_prob.is_finite(), "log_prob should be finite for large logits");
+        assert!(
+            log_prob.is_finite(),
+            "log_prob should be finite for large logits"
+        );
         assert!(log_prob > -2.0 && log_prob <= 0.0);
     }
 
@@ -573,7 +627,10 @@ mod tests {
     fn test_log_softmax_very_negative_values() {
         let logits = vec![-1000.0, -999.0, -998.0];
         let (log_prob, _) = log_softmax(&logits, 2); // -998 is highest
-        assert!(log_prob.is_finite(), "log_prob should be finite for very negative logits");
+        assert!(
+            log_prob.is_finite(),
+            "log_prob should be finite for very negative logits"
+        );
     }
 
     // ── argmax_token tests ────────────────────────────────────────

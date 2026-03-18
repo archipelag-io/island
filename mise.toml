@@ -5,6 +5,10 @@ rust = "stable"
 RUST_LOG = "info"
 RUST_BACKTRACE = "1"
 
+# ============================================================
+# Build
+# ============================================================
+
 [tasks.build]
 description = "Build in release mode"
 run = "cargo build --release"
@@ -17,21 +21,17 @@ run = "cargo run"
 description = "Build and run in release mode"
 run = "cargo run --release"
 
-[tasks.test]
-description = "Run tests"
-run = "cargo test"
+[tasks.install]
+description = "Install binary locally"
+run = "cargo install --path ."
 
-[tasks."test:verbose"]
-description = "Run tests with output"
-run = "cargo test -- --nocapture"
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
 
-[tasks.check]
-description = "Run cargo check"
-run = "cargo check"
-
-[tasks.clippy]
-description = "Run clippy lints"
-run = "cargo clippy -- -D warnings"
+# ============================================================
+# Lint & Format
+# ============================================================
 
 [tasks.fmt]
 description = "Format code"
@@ -41,22 +41,74 @@ run = "cargo fmt"
 description = "Check formatting"
 run = "cargo fmt -- --check"
 
-[tasks.clean]
-description = "Clean build artifacts"
-run = "cargo clean"
+[tasks.check]
+description = "Run cargo check"
+run = "cargo check"
+
+[tasks.clippy]
+description = "Run clippy lints"
+run = "cargo clippy -- -D warnings"
+
+[tasks."clippy:all"]
+description = "Clippy with all default-compilable features"
+run = "cargo clippy --all-targets -- -D warnings"
+
+# ============================================================
+# Test
+# ============================================================
+
+[tasks.test]
+description = "Run tests"
+run = "cargo test"
+
+[tasks."test:verbose"]
+description = "Run tests with output"
+run = "cargo test -- --nocapture"
+
+[tasks."test:module"]
+description = "Run tests for a specific module (usage: mise run test:module nats)"
+run = "cargo test $1 -- --nocapture"
+
+[tasks."test:coverage"]
+description = "Run tests with coverage report (installs cargo-llvm-cov if needed)"
+run = "scripts/coverage.sh"
+
+[tasks."test:coverage:html"]
+description = "Generate HTML coverage report and open it"
+run = "scripts/coverage.sh --html"
+
+# ============================================================
+# Security
+# ============================================================
+
+[tasks.audit]
+description = "Audit dependencies for known vulnerabilities"
+run = "cargo audit"
+
+[tasks."audit:fix"]
+description = "Auto-fix vulnerable dependencies where possible"
+run = "cargo audit fix"
+
+# ============================================================
+# Docs & Bench
+# ============================================================
 
 [tasks.doc]
 description = "Generate and open documentation"
 run = "cargo doc --no-deps --open"
 
-[tasks.ci]
-description = "Run all CI checks"
-depends = ["fmt:check", "clippy", "test"]
-
-[tasks.install]
-description = "Install binary locally"
-run = "cargo install --path ."
-
 [tasks.bench]
 description = "Run benchmarks"
 run = "cargo bench"
+
+# ============================================================
+# CI Pipeline
+# ============================================================
+
+[tasks.ci]
+description = "Run full local CI pipeline (format, lint, test, audit, build, doc)"
+run = "scripts/ci.sh"
+
+[tasks."ci:quick"]
+description = "Quick CI: format + clippy + test only"
+depends = ["fmt:check", "clippy", "test"]

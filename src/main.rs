@@ -19,11 +19,6 @@ mod gating;
 mod gguf;
 #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 mod gguf_format;
-mod messages;
-#[allow(dead_code)]
-mod metrics;
-mod model_cache;
-mod nats;
 #[cfg(feature = "pipeline")]
 #[allow(dead_code)]
 mod layer_executor;
@@ -32,29 +27,34 @@ mod layer_executor;
 mod layer_forward;
 #[cfg(feature = "pipeline")]
 mod logits;
+mod messages;
+#[allow(dead_code)]
+mod metrics;
+mod model_cache;
+mod nats;
+#[cfg(target_os = "linux")]
+mod oci;
+#[cfg(feature = "onnx")]
+mod onnx;
 #[cfg(feature = "pipeline")]
 mod pipeline;
 mod preload;
+#[allow(dead_code)]
+mod security;
 #[cfg(feature = "pipeline")]
 mod shard_split;
 #[cfg(feature = "pipeline")]
 mod speculative;
+mod state;
+#[cfg(feature = "pipeline")]
+mod stun;
 #[cfg(feature = "pipeline")]
 mod tee;
 #[cfg(feature = "pipeline")]
 mod training;
 #[cfg(feature = "pipeline")]
-mod stun;
-#[cfg(feature = "pipeline")]
 #[allow(dead_code)]
 mod transport;
-#[cfg(target_os = "linux")]
-mod oci;
-#[cfg(feature = "onnx")]
-mod onnx;
-#[allow(dead_code)]
-mod security;
-mod state;
 #[allow(dead_code)]
 mod update;
 mod wasm;
@@ -117,8 +117,7 @@ async fn main() -> Result<()> {
         .expect("Failed to install rustls crypto provider");
 
     // Initialize logging with RUST_LOG support (default: info)
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if std::env::var("ARCHIPELAG_LOG_JSON").is_ok() {
         // JSON output for production log aggregation
@@ -149,10 +148,16 @@ async fn main() -> Result<()> {
         let input = std::path::Path::new(&model_path);
         let output = std::path::Path::new(&args.output_dir);
         if args.layer_aware {
-            info!("Layer-aware split: {} into {} shards", model_path, args.shards);
+            info!(
+                "Layer-aware split: {} into {} shards",
+                model_path, args.shards
+            );
             gguf_format::split_by_layers(input, args.shards, output)?;
         } else {
-            info!("Byte-range split: {} into {} shards", model_path, args.shards);
+            info!(
+                "Byte-range split: {} into {} shards",
+                model_path, args.shards
+            );
             shard_split::split_model(input, args.shards, output)?;
         }
         return Ok(());
@@ -179,7 +184,9 @@ async fn main() -> Result<()> {
     // If container test mode, run a single job and exit
     if let Some(prompt) = args.test_job {
         let docker = docker.ok_or_else(|| {
-            anyhow::anyhow!("Docker is required for container test jobs. Install Docker and try again.")
+            anyhow::anyhow!(
+                "Docker is required for container test jobs. Install Docker and try again."
+            )
         })?;
         info!("Running test job with prompt: {}", prompt);
         return executor::run_test_job(&docker, &config, &prompt).await;

@@ -51,8 +51,9 @@ impl ModelCache {
             }
         };
 
-        std::fs::create_dir_all(&cache_dir)
-            .with_context(|| format!("Failed to create model cache dir: {}", cache_dir.display()))?;
+        std::fs::create_dir_all(&cache_dir).with_context(|| {
+            format!("Failed to create model cache dir: {}", cache_dir.display())
+        })?;
 
         let max_cache_bytes = config.max_cache_gb * 1024 * 1024 * 1024;
 
@@ -82,9 +83,7 @@ impl ModelCache {
                 if path.is_dir() {
                     if let Ok(metadata) = std::fs::metadata(&path) {
                         if let Some(model_file) = find_model_file(&path) {
-                            let size = std::fs::metadata(&model_file)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
+                            let size = std::fs::metadata(&model_file).map(|m| m.len()).unwrap_or(0);
                             let key = path
                                 .file_name()
                                 .unwrap_or_default()
@@ -119,11 +118,7 @@ impl ModelCache {
     ///
     /// Accepts either a direct URL (`https://...`) or a HuggingFace URI
     /// (`hf://repo_id` or `hf://repo_id:filename`).
-    pub async fn download_model(
-        &self,
-        uri: &str,
-        expected_hash: Option<&str>,
-    ) -> Result<PathBuf> {
+    pub async fn download_model(&self, uri: &str, expected_hash: Option<&str>) -> Result<PathBuf> {
         let resolved = resolve_uri(uri, self.hf_token.as_deref()).await?;
         let download_url = &resolved.url;
         let display_name = &resolved.display_name;
@@ -137,10 +132,7 @@ impl ModelCache {
             if let Some(entry) = entries.get_mut(&cache_key) {
                 if entry.path.exists() {
                     entry.last_used = SystemTime::now();
-                    let _ = filetime::set_file_mtime(
-                        &model_dir,
-                        filetime::FileTime::now(),
-                    );
+                    let _ = filetime::set_file_mtime(&model_dir, filetime::FileTime::now());
                     info!("Model cache hit: {}", display_name);
                     return Ok(entry.path.clone());
                 }
@@ -215,7 +207,8 @@ impl ModelCache {
         // Verify hash if provided
         let computed_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
         if let Some(expected) = expected_hash {
-            if !expected.is_empty() && expected != "sha256:placeholder" && computed_hash != expected {
+            if !expected.is_empty() && expected != "sha256:placeholder" && computed_hash != expected
+            {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 anyhow::bail!(
                     "Model hash mismatch for {}: expected {}, got {}",
@@ -237,7 +230,11 @@ impl ModelCache {
                 )
             })?;
 
-        info!("Model downloaded: {} ({:.1} MB)", display_name, downloaded as f64 / 1_048_576.0);
+        info!(
+            "Model downloaded: {} ({:.1} MB)",
+            display_name,
+            downloaded as f64 / 1_048_576.0
+        );
 
         // Register in cache
         {
@@ -316,11 +313,7 @@ async fn resolve_uri(uri: &str, hf_token: Option<&str>) -> Result<ResolvedUri> {
         resolve_huggingface(hf_ref, hf_token).await
     } else {
         // Direct URL
-        let filename = uri
-            .rsplit('/')
-            .next()
-            .unwrap_or("model.bin")
-            .to_string();
+        let filename = uri.rsplit('/').next().unwrap_or("model.bin").to_string();
         Ok(ResolvedUri {
             url: uri.to_string(),
             display_name: filename.clone(),
@@ -378,7 +371,9 @@ async fn resolve_huggingface(hf_ref: &str, hf_token: Option<&str>) -> Result<Res
             );
         }
 
-        let body: serde_json::Value = response.json().await
+        let body: serde_json::Value = response
+            .json()
+            .await
             .context("Failed to parse HF Hub API response")?;
 
         // Extract siblings (file list) from the API response
@@ -446,7 +441,10 @@ fn find_model_filename_from_api(body: &serde_json::Value, repo_id: &str) -> Resu
     if let Some(f) = filenames.iter().find(|f| **f == "model.safetensors") {
         return Ok(f.to_string());
     }
-    if let Some(f) = filenames.iter().find(|f| **f == "diffusion_pytorch_model.safetensors") {
+    if let Some(f) = filenames
+        .iter()
+        .find(|f| **f == "diffusion_pytorch_model.safetensors")
+    {
         return Ok(f.to_string());
     }
 
@@ -457,9 +455,10 @@ fn find_model_filename_from_api(body: &serde_json::Value, repo_id: &str) -> Resu
 
     // Fallback: first non-config, non-tokenizer file that looks like a model
     let model_extensions = [".bin", ".safetensors", ".onnx", ".gguf", ".pt"];
-    if let Some(f) = filenames.iter().find(|f| {
-        model_extensions.iter().any(|ext| f.ends_with(ext))
-    }) {
+    if let Some(f) = filenames
+        .iter()
+        .find(|f| model_extensions.iter().any(|ext| f.ends_with(ext)))
+    {
         return Ok(f.to_string());
     }
 
@@ -529,14 +528,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_direct_url() {
-        let resolved = resolve_uri("https://example.com/models/bert.onnx", None).await.unwrap();
+        let resolved = resolve_uri("https://example.com/models/bert.onnx", None)
+            .await
+            .unwrap();
         assert_eq!(resolved.url, "https://example.com/models/bert.onnx");
         assert_eq!(resolved.filename, "bert.onnx");
     }
 
     #[tokio::test]
     async fn test_resolve_hf_with_filename() {
-        let resolved = resolve_uri("hf://TheBloke/Mistral-7B-GGUF:mistral-7b.Q4_K_M.gguf", None).await.unwrap();
+        let resolved = resolve_uri("hf://TheBloke/Mistral-7B-GGUF:mistral-7b.Q4_K_M.gguf", None)
+            .await
+            .unwrap();
         assert_eq!(
             resolved.url,
             "https://huggingface.co/TheBloke/Mistral-7B-GGUF/resolve/main/mistral-7b.Q4_K_M.gguf"

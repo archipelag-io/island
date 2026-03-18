@@ -7,8 +7,8 @@ use crate::config::AgentConfig;
 use crate::docker::{self, ContainerConfig, ContainerOutput};
 use crate::messages::WorkloadOutput;
 use crate::metrics::collect_system_metrics;
-use crate::metrics::gpu::GpuMetricsCollector;
 use crate::metrics::gpu::bandwidth_for_gpu;
+use crate::metrics::gpu::GpuMetricsCollector;
 use crate::nats::{
     self, AssignJob, CacheMetricsSnapshot, CancelJob, GpuMetricsSnapshot, HostCapabilities,
     JobSubscription, NatsAgent, PerformanceEstimates, PreloadRecommendation,
@@ -117,8 +117,8 @@ impl Agent {
             info!("Registry allowlist disabled");
             RegistryAllowlist::disabled()
         } else if config.registry.allowed.is_empty() {
-            let allowlist = RegistryAllowlist::new()
-                .with_require_digest(config.registry.require_digest);
+            let allowlist =
+                RegistryAllowlist::new().with_require_digest(config.registry.require_digest);
             info!(
                 "Registry allowlist enabled with defaults (require_digest: {})",
                 config.registry.require_digest
@@ -138,7 +138,7 @@ impl Agent {
         // Initialize model cache for GGUF/ONNX/diffusers models
         let model_cache = Arc::new(
             crate::model_cache::ModelCache::new(&config.model_cache)
-                .context("Failed to initialize model cache")?
+                .context("Failed to initialize model cache")?,
         );
         model_cache.init().await?;
         state.set_model_cache(model_cache);
@@ -220,13 +220,14 @@ impl Agent {
         cache_cleanup_interval.tick().await; // consume first immediate tick
 
         // Update checker (30 min interval; has internal rate limiting with jitter)
-        let mut update_checker = match UpdateChecker::new(&self.config, self.nats.host_id().to_string()) {
-            Ok(checker) => Some(checker),
-            Err(e) => {
-                warn!("Failed to initialize update checker: {}", e);
-                None
-            }
-        };
+        let mut update_checker =
+            match UpdateChecker::new(&self.config, self.nats.host_id().to_string()) {
+                Ok(checker) => Some(checker),
+                Err(e) => {
+                    warn!("Failed to initialize update checker: {}", e);
+                    None
+                }
+            };
         let mut update_check_interval = tokio::time::interval(Duration::from_secs(1800));
         update_check_interval.tick().await; // consume first immediate tick
 
@@ -631,7 +632,10 @@ impl Agent {
 
     /// Compute performance estimates from hardware capabilities.
     /// These are sent with each heartbeat so the coordinator can rank Islands.
-    fn compute_performance_estimates(&self, capabilities: &HostCapabilities) -> PerformanceEstimates {
+    fn compute_performance_estimates(
+        &self,
+        capabilities: &HostCapabilities,
+    ) -> PerformanceEstimates {
         let estimates = compute_performance_estimates_from_capabilities(capabilities);
 
         debug!(
@@ -789,10 +793,20 @@ async fn execute_job(
     if let Some(ref pc_value) = job.pipeline_config {
         match serde_json::from_value::<crate::pipeline::PipelineConfig>(pc_value.clone()) {
             Ok(pipeline_config) => {
-                return crate::pipeline::execute_pipeline_job(nats, state, &job, pipeline_config, cancel_rx).await;
+                return crate::pipeline::execute_pipeline_job(
+                    nats,
+                    state,
+                    &job,
+                    pipeline_config,
+                    cancel_rx,
+                )
+                .await;
             }
             Err(e) => {
-                tracing::error!("Failed to parse pipeline_config: {}, falling back to normal dispatch", e);
+                tracing::error!(
+                    "Failed to parse pipeline_config: {}, falling back to normal dispatch",
+                    e
+                );
             }
         }
     }
@@ -802,10 +816,20 @@ async fn execute_job(
     if let Some(ref ec_value) = job.expert_config {
         match serde_json::from_value::<crate::expert::ExpertConfig>(ec_value.clone()) {
             Ok(expert_config) => {
-                return crate::expert::execute_expert_job(nats, state, &job, expert_config, cancel_rx).await;
+                return crate::expert::execute_expert_job(
+                    nats,
+                    state,
+                    &job,
+                    expert_config,
+                    cancel_rx,
+                )
+                .await;
             }
             Err(e) => {
-                tracing::error!("Failed to parse expert_config: {}, falling back to normal dispatch", e);
+                tracing::error!(
+                    "Failed to parse expert_config: {}, falling back to normal dispatch",
+                    e
+                );
             }
         }
     }
@@ -815,10 +839,20 @@ async fn execute_job(
     if let Some(ref sc_value) = job.speculative_config {
         match serde_json::from_value::<crate::speculative::SpeculativeConfig>(sc_value.clone()) {
             Ok(spec_config) => {
-                return crate::speculative::execute_speculative_job(nats, state, &job, spec_config, cancel_rx).await;
+                return crate::speculative::execute_speculative_job(
+                    nats,
+                    state,
+                    &job,
+                    spec_config,
+                    cancel_rx,
+                )
+                .await;
             }
             Err(e) => {
-                tracing::error!("Failed to parse speculative_config: {}, falling back to normal dispatch", e);
+                tracing::error!(
+                    "Failed to parse speculative_config: {}, falling back to normal dispatch",
+                    e
+                );
             }
         }
     }
@@ -828,10 +862,20 @@ async fn execute_job(
     if let Some(ref tc_value) = job.training_config {
         match serde_json::from_value::<crate::training::TrainingConfig>(tc_value.clone()) {
             Ok(training_config) => {
-                return crate::training::execute_training_job(nats, state, &job, training_config, cancel_rx).await;
+                return crate::training::execute_training_job(
+                    nats,
+                    state,
+                    &job,
+                    training_config,
+                    cancel_rx,
+                )
+                .await;
             }
             Err(e) => {
-                tracing::error!("Failed to parse training_config: {}, falling back to normal dispatch", e);
+                tracing::error!(
+                    "Failed to parse training_config: {}, falling back to normal dispatch",
+                    e
+                );
             }
         }
     }
@@ -844,7 +888,9 @@ async fn execute_job(
         #[cfg(feature = "gguf")]
         "llmcpp" => crate::gguf::execute_gguf_job(nats, state, config, &job, cancel_rx).await,
         #[cfg(feature = "diffusers")]
-        "diffusers" => crate::diffusers::execute_diffusers_job(nats, state, config, &job, cancel_rx).await,
+        "diffusers" => {
+            crate::diffusers::execute_diffusers_job(nats, state, config, &job, cancel_rx).await
+        }
         _ => {
             let docker = docker.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1340,9 +1386,10 @@ pub(crate) fn parse_nvidia_smi_output(stdout: &str) -> (Option<String>, Option<u
 pub(crate) fn compute_performance_estimates_from_capabilities(
     capabilities: &HostCapabilities,
 ) -> PerformanceEstimates {
-    let gpu_bw = capabilities.gpu_model.as_deref().map(|model| {
-        bandwidth_for_gpu(Some(model), capabilities.gpu_vram_mb)
-    });
+    let gpu_bw = capabilities
+        .gpu_model
+        .as_deref()
+        .map(|model| bandwidth_for_gpu(Some(model), capabilities.gpu_vram_mb));
 
     // Estimate LLM tok/s for a reference 7B Q4_K_M model (~4.5 GB)
     let reference_model_size_gb: f32 = 4.5;
@@ -1357,11 +1404,8 @@ pub(crate) fn compute_performance_estimates_from_capabilities(
     });
 
     // Max concurrent containers: min(CPU / 2, RAM / 2048) — each container gets at least 2 cores and 2 GB
-    let max_containers = std::cmp::min(
-        capabilities.cpu_cores / 2,
-        capabilities.ram_mb / 2048,
-    )
-    .max(1);
+    let max_containers =
+        std::cmp::min(capabilities.cpu_cores / 2, capabilities.ram_mb / 2048).max(1);
 
     // WASM memory: allow up to 75% of RAM for WASM linear memory
     let wasm_mem = capabilities.ram_mb * 3 / 4;

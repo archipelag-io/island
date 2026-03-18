@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_sign_and_verify_roundtrip() {
-        use ed25519_dalek::{SigningKey, Signer};
+        use ed25519_dalek::{Signer, SigningKey};
 
         // Generate a test keypair
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);

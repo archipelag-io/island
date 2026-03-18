@@ -69,7 +69,10 @@ pub fn select_starter_models(
 
     // Tiny tier: ≤2 GB RAM — WASM only
     if ram_mb <= 2048 {
-        info!("Hardware tier: tiny ({}MB RAM) — WASM only, no model preloads", ram_mb);
+        info!(
+            "Hardware tier: tiny ({}MB RAM) — WASM only, no model preloads",
+            ram_mb
+        );
         return models;
     }
 
@@ -186,11 +189,7 @@ pub async fn preload_models(cache: &Arc<ModelCache>, models: Vec<PreloadEntry>) 
         info!("Preloading: {}", model.name);
         match cache.download_model(&model.uri, None).await {
             Ok(path) => {
-                info!(
-                    "Preloaded: {} → {}",
-                    model.name,
-                    path.display()
-                );
+                info!("Preloaded: {} → {}", model.name, path.display());
             }
             Err(e) => {
                 warn!("Failed to preload {} (non-fatal): {}", model.name, e);

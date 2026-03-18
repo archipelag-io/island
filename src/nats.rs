@@ -228,7 +228,9 @@ fn default_runtime_type() -> String {
 }
 
 /// Deserialize a field that may be a string or an integer (coordinator sends workload_id as int)
-fn deserialize_string_or_int<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+fn deserialize_string_or_int<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -813,11 +815,7 @@ impl NatsAgent {
 
     /// Publish a status message on the ring status subject
     #[allow(dead_code)] // Pipeline ring feature not yet wired
-    pub async fn publish_ring_status(
-        &self,
-        group_id: &str,
-        msg: &serde_json::Value,
-    ) -> Result<()> {
+    pub async fn publish_ring_status(&self, group_id: &str, msg: &serde_json::Value) -> Result<()> {
         let subject = format!("ring.{}.status", group_id);
         let payload = serde_json::to_vec(msg).context("Failed to serialize ring status")?;
         self.client
@@ -829,11 +827,7 @@ impl NatsAgent {
 
     /// Publish output from the last position in a ring
     #[allow(dead_code)] // Pipeline ring feature not yet wired
-    pub async fn publish_ring_output(
-        &self,
-        group_id: &str,
-        msg: &serde_json::Value,
-    ) -> Result<()> {
+    pub async fn publish_ring_output(&self, group_id: &str, msg: &serde_json::Value) -> Result<()> {
         let subject = format!("ring.{}.output", group_id);
         let payload = serde_json::to_vec(msg).context("Failed to serialize ring output")?;
         self.client
@@ -1179,10 +1173,7 @@ mod tests {
         });
         let job: AssignJob = serde_json::from_value(j).unwrap();
         assert_eq!(job.runtime_type, "llmcpp");
-        assert_eq!(
-            job.model_url,
-            Some("https://hf.co/model.gguf".to_string())
-        );
+        assert_eq!(job.model_url, Some("https://hf.co/model.gguf".to_string()));
         assert_eq!(job.model_context_size, Some(2048));
         assert_eq!(job.model_temperature, Some(0.7));
     }

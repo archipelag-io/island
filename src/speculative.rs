@@ -40,9 +40,9 @@ pub struct SpeculativeConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpecSubjects {
     pub control: String,
-    pub draft: String,   // Draft → Verify: K tokens + log-probs
-    pub verify: String,  // Verify → Draft: VerifyResult (accepted count + correction)
-    pub output: String,  // → Coordinator: accepted tokens
+    pub draft: String,  // Draft → Verify: K tokens + log-probs
+    pub verify: String, // Verify → Draft: VerifyResult (accepted count + correction)
+    pub output: String, // → Coordinator: accepted tokens
     pub status: String,
 }
 
@@ -81,24 +81,33 @@ pub async fn execute_speculative_job(
     let role = &config.role;
 
     info!(
-        job_id, group_id, role,
+        job_id,
+        group_id,
+        role,
         "Starting speculative decoding (K={}, threshold={})",
-        config.draft_tokens, config.acceptance_threshold,
+        config.draft_tokens,
+        config.acceptance_threshold,
     );
 
     // Download model
-    let model_url = config.shard_spec.get("model_url")
+    let model_url = config
+        .shard_spec
+        .get("model_url")
         .and_then(|v| v.as_str())
         .or(job.model_url.as_deref())
         .context("Missing model URL")?;
 
-    let model_hash = config.shard_spec.get("model_hash")
+    let model_hash = config
+        .shard_spec
+        .get("model_hash")
         .and_then(|v| v.as_str())
         .or(job.model_hash.as_deref());
 
     let model_cache = {
         let st = state.read().await;
-        st.model_cache().context("Model cache not initialized")?.clone()
+        st.model_cache()
+            .context("Model cache not initialized")?
+            .clone()
     };
 
     info!(job_id, role, "Downloading model: {}", model_url);
@@ -117,7 +126,8 @@ pub async fn execute_speculative_job(
             "status": "ready",
             "role": role,
         }))?,
-    ).await?;
+    )
+    .await?;
 
     // Subscribe to control
     let mut control_sub = nats
@@ -154,8 +164,28 @@ pub async fn execute_speculative_job(
     }
 
     match role.as_str() {
-        "draft" => execute_draft(nats, job, &config, &model_path_str, &mut control_sub, cancel_rx).await,
-        "verify" => execute_verify(nats, job, &config, &model_path_str, &mut control_sub, cancel_rx).await,
+        "draft" => {
+            execute_draft(
+                nats,
+                job,
+                &config,
+                &model_path_str,
+                &mut control_sub,
+                cancel_rx,
+            )
+            .await
+        }
+        "verify" => {
+            execute_verify(
+                nats,
+                job,
+                &config,
+                &model_path_str,
+                &mut control_sub,
+                cancel_rx,
+            )
+            .await
+        }
         _ => anyhow::bail!("Unknown speculative role: {}", role),
     }
 }
@@ -199,12 +229,18 @@ async fn execute_draft(
     };
 
     // Subscribe to verify results
-    let mut verify_sub = nats.subscribe_ring(&config.spec_subjects.verify).await
+    let mut verify_sub = nats
+        .subscribe_ring(&config.spec_subjects.verify)
+        .await
         .context("Failed to subscribe to verify subject")?;
 
     let context_size = job.model_context_size.unwrap_or(2048);
     let temperature = job.model_temperature.unwrap_or(0.7);
-    let max_tokens = job.input.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1024) as usize;
+    let max_tokens = job
+        .input
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024) as usize;
 
     // Generate all tokens via spawn_blocking, collect into channel
     let model_path_owned = model_path.to_string();
@@ -223,29 +259,41 @@ async fn execute_draft(
         let mut sp = SessionParams::default();
         sp.n_ctx = context_size;
 
-        let mut session = model.create_session(sp)
+        let mut session = model
+            .create_session(sp)
             .map_err(|e| anyhow::anyhow!("Session error: {:?}", e))?;
 
-        session.advance_context(&prompt_clone)
+        session
+            .advance_context(&prompt_clone)
             .map_err(|e| anyhow::anyhow!("Prompt error: {:?}", e))?;
 
         let sampler = StandardSampler::new_softmax(
             vec![
-                SamplerStage::RepetitionPenalty { repetition_penalty: 1.1, frequency_penalty: 0.0, presence_penalty: 0.0, last_n: 64 },
+                SamplerStage::RepetitionPenalty {
+                    repetition_penalty: 1.1,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    last_n: 64,
+                },
                 SamplerStage::TopP(0.9),
                 SamplerStage::Temperature(temperature),
             ],
             1,
         );
 
-        let completions = session.start_completing_with(sampler, max_tokens)
+        let completions = session
+            .start_completing_with(sampler, max_tokens)
             .map_err(|e| anyhow::anyhow!("Completion error: {:?}", e))?;
 
         let mut count: u64 = 0;
         for token in completions.into_strings() {
-            if *cancel.borrow() { break; }
+            if *cancel.borrow() {
+                break;
+            }
             count += 1;
-            if tx.blocking_send(token.to_string()).is_err() { break; }
+            if tx.blocking_send(token.to_string()).is_err() {
+                break;
+            }
         }
         Ok::<u64, anyhow::Error>(count)
     });
@@ -277,16 +325,22 @@ async fn execute_draft(
         }
 
         // Build draft tokens (without log-probs — they come from the verify step)
-        let draft_tokens: Vec<DraftToken> = draft_batch.iter().enumerate().map(|(i, text)| {
-            DraftToken {
-                token_id: i as i32, // Placeholder — real token IDs come from tokenization
-                text: text.clone(),
-                log_prob: 0.0, // Draft log-probs would require FFI extraction
-            }
-        }).collect();
+        let draft_tokens: Vec<DraftToken> = draft_batch
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                DraftToken {
+                    token_id: i as i32, // Placeholder — real token IDs come from tokenization
+                    text: text.clone(),
+                    log_prob: 0.0, // Draft log-probs would require FFI extraction
+                }
+            })
+            .collect();
 
         // Send batch to verify Island
-        let draft_index = config.shard_spec.get("draft_index")
+        let draft_index = config
+            .shard_spec
+            .get("draft_index")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
@@ -298,10 +352,8 @@ async fn execute_draft(
             draft_index,
         };
 
-        nats.publish_raw(
-            &config.spec_subjects.draft,
-            serde_json::to_vec(&batch_msg)?,
-        ).await?;
+        nats.publish_raw(&config.spec_subjects.draft, serde_json::to_vec(&batch_msg)?)
+            .await?;
 
         // Wait for verify result (with timeout)
         let verify_result = select! {
@@ -342,7 +394,8 @@ async fn execute_draft(
                         "drafted": result.draft_count,
                         "accepted": result.accepted_count,
                     }))?,
-                ).await?;
+                )
+                .await?;
 
                 result.accepted_count
             }
@@ -358,7 +411,8 @@ async fn execute_draft(
                 "is_final": false,
                 "seq": seq,
             });
-            nats.publish_raw(&config.spec_subjects.output, serde_json::to_vec(&output)?).await?;
+            nats.publish_raw(&config.spec_subjects.output, serde_json::to_vec(&output)?)
+                .await?;
             context_text.push_str(&token_text);
         }
 
@@ -382,14 +436,22 @@ async fn execute_draft(
         "seq": seq + 1,
         "usage": { "completion_tokens": token_count },
     });
-    nats.publish_raw(&config.spec_subjects.output, serde_json::to_vec(&final_output)?).await?;
+    nats.publish_raw(
+        &config.spec_subjects.output,
+        serde_json::to_vec(&final_output)?,
+    )
+    .await?;
 
     nats.publish_raw(
         &config.spec_subjects.status,
         serde_json::to_vec(&serde_json::json!({"status": "complete"}))?,
-    ).await?;
+    )
+    .await?;
 
-    info!(job_id, "Draft completed: {} tokens generated, {} streamed", token_count, seq);
+    info!(
+        job_id,
+        "Draft completed: {} tokens generated, {} streamed", token_count, seq
+    );
     Ok(())
 }
 
@@ -406,16 +468,22 @@ async fn execute_verify(
     let job_id = &job.job_id;
     let threshold = config.acceptance_threshold;
 
-    let mut draft_sub = nats.subscribe_ring(&config.spec_subjects.draft).await
+    let mut draft_sub = nats
+        .subscribe_ring(&config.spec_subjects.draft)
+        .await
         .context("Failed to subscribe to draft subject")?;
 
     let model_path_owned = model_path.to_string();
     let context_size = job.model_context_size.unwrap_or(2048);
 
-    info!(job_id, "Verify Island loading model for incremental verification");
+    info!(
+        job_id,
+        "Verify Island loading model for incremental verification"
+    );
 
     // Channel for sending batches to the verification thread
-    let (batch_tx, batch_rx) = std::sync::mpsc::channel::<(DraftBatch, tokio::sync::oneshot::Sender<VerifyResult>)>();
+    let (batch_tx, batch_rx) =
+        std::sync::mpsc::channel::<(DraftBatch, tokio::sync::oneshot::Sender<VerifyResult>)>();
 
     // Spawn a long-lived verification thread that keeps the model loaded
     let verify_handle = tokio::task::spawn_blocking(move || {
@@ -454,11 +522,16 @@ async fn execute_verify(
     });
 
     // Determine draft count for best-of-N collection
-    let draft_count = config.shard_spec.get("draft_count")
+    let draft_count = config
+        .shard_spec
+        .get("draft_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(1) as usize;
 
-    info!(job_id, "Verify Island: draft_count={}, collecting best-of-N batches", draft_count);
+    info!(
+        job_id,
+        "Verify Island: draft_count={}, collecting best-of-N batches", draft_count
+    );
 
     // Main loop: collect N draft batches, verify each, pick best, publish winner
     let mut pending_batches: Vec<DraftBatch> = Vec::with_capacity(draft_count);
@@ -584,8 +657,13 @@ unsafe fn verify_batch_incremental(
     let max_tok = context_size as i32;
     let mut tokens = vec![0i32; max_tok as usize];
     let n_ctx = llama_cpp_sys::llama_tokenize(
-        model, c_text.as_ptr(), batch.context_so_far.len() as i32,
-        tokens.as_mut_ptr(), max_tok, true, false,
+        model,
+        c_text.as_ptr(),
+        batch.context_so_far.len() as i32,
+        tokens.as_mut_ptr(),
+        max_tok,
+        true,
+        false,
     );
 
     if n_ctx < 0 {
@@ -599,9 +677,8 @@ unsafe fn verify_batch_incremental(
     }
 
     // Decode all tokens
-    let llama_batch = llama_cpp_sys::llama_batch_get_one(
-        tokens.as_mut_ptr(), tokens.len() as i32, 0, 0,
-    );
+    let llama_batch =
+        llama_cpp_sys::llama_batch_get_one(tokens.as_mut_ptr(), tokens.len() as i32, 0, 0);
 
     if llama_cpp_sys::llama_decode(ctx, llama_batch) != 0 {
         return accept_all(batch);
@@ -616,17 +693,25 @@ unsafe fn verify_batch_incremental(
     for (i, draft) in batch.tokens.iter().enumerate() {
         let pos = (verify_start + i) as i32;
         let logits_ptr = llama_cpp_sys::llama_get_logits_ith(ctx, pos);
-        if logits_ptr.is_null() { break; }
+        if logits_ptr.is_null() {
+            break;
+        }
 
         let logits = std::slice::from_raw_parts(logits_ptr, n_vocab);
         let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let log_sum_exp = logits.iter().map(|&l| (l - max_logit).exp()).sum::<f32>().ln() + max_logit;
+        let log_sum_exp = logits
+            .iter()
+            .map(|&l| (l - max_logit).exp())
+            .sum::<f32>()
+            .ln()
+            + max_logit;
         let verifier_log_prob = logits[draft.token_id as usize] - log_sum_exp;
 
         if (verifier_log_prob as f64) > threshold.ln() {
             accepted_count += 1;
         } else {
-            let best = logits.iter()
+            let best = logits
+                .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, &l)| (idx as i32, l - log_sum_exp))
@@ -641,7 +726,11 @@ unsafe fn verify_batch_incremental(
         }
     }
 
-    VerifyResult { accepted_count, corrected_token, draft_count: batch.tokens.len() }
+    VerifyResult {
+        accepted_count,
+        corrected_token,
+        draft_count: batch.tokens.len(),
+    }
 }
 
 fn accept_all(batch: &DraftBatch) -> VerifyResult {
@@ -707,7 +796,11 @@ mod tests {
         let batch = DraftBatch {
             job_id: "test-123".into(),
             context_so_far: "Hello".into(),
-            tokens: vec![DraftToken { token_id: 1, text: " world".into(), log_prob: -0.5 }],
+            tokens: vec![DraftToken {
+                token_id: 1,
+                text: " world".into(),
+                log_prob: -0.5,
+            }],
             seq: 1,
             draft_index: 0,
         };

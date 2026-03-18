@@ -62,9 +62,9 @@ pub struct RingSubjects {
 /// Header prepended to activation data on the wire
 #[derive(Debug, Clone)]
 pub struct ActivationHeader {
-    pub dtype: u16,    // 0 = f16, 1 = f32, 2 = bf16
-    pub ndims: u16,    // number of dimensions
-    pub dim0: u32,     // first dimension (e.g., hidden_size)
+    pub dtype: u16, // 0 = f16, 1 = f32, 2 = bf16
+    pub ndims: u16, // number of dimensions
+    pub dim0: u32,  // first dimension (e.g., hidden_size)
 }
 
 impl ActivationHeader {
@@ -158,7 +158,10 @@ pub async fn execute_pipeline_job(
         .with_context(|| format!("Failed to download shard: {}", model_url))?;
 
     let model_path_str = model_path.to_string_lossy().to_string();
-    info!(job_id, position, "Model shard cached at: {}", model_path_str);
+    info!(
+        job_id,
+        position, "Model shard cached at: {}", model_path_str
+    );
 
     // Signal ready to coordinator
     nats.publish_ring_status(
@@ -447,13 +450,13 @@ async fn execute_first_position(
     }
 
     // Signal completion
-    nats.publish_ring_status(
-        group_id,
-        &serde_json::json!({"status": "complete"}),
-    )
-    .await?;
+    nats.publish_ring_status(group_id, &serde_json::json!({"status": "complete"}))
+        .await?;
 
-    info!(job_id, "Pipeline position 0 completed: {} tokens", token_count);
+    info!(
+        job_id,
+        "Pipeline position 0 completed: {} tokens", token_count
+    );
     Ok(())
 }
 
@@ -476,13 +479,22 @@ async fn execute_relay_position(
     let is_last = config.ring_subjects.next_activate.is_none();
 
     // Check if hidden-state mode is requested (uses shard model for actual layer execution)
-    let use_hidden_state = job.input.get("hidden_state_mode")
+    let use_hidden_state = job
+        .input
+        .get("hidden_state_mode")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
         && crate::layer_forward::supports_layer_forward();
 
-    let mode = if use_hidden_state { "hidden-state" } else { "token-passthrough" };
-    info!(job_id, position, "Relay position entering main loop (mode: {})", mode);
+    let mode = if use_hidden_state {
+        "hidden-state"
+    } else {
+        "token-passthrough"
+    };
+    info!(
+        job_id,
+        position, "Relay position entering main loop (mode: {})", mode
+    );
 
     loop {
         select! {
@@ -600,7 +612,7 @@ mod tests {
     #[test]
     fn test_activation_header_roundtrip() {
         let header = ActivationHeader {
-            dtype: 0,  // f16
+            dtype: 0, // f16
             ndims: 1,
             dim0: 4096,
         };

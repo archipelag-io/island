@@ -69,7 +69,12 @@ pub async fn pull_image(image: &str, cache_dir: &Path) -> Result<()> {
         let layer_path = image_cache.join(&layer_filename);
 
         if layer_path.exists() {
-            debug!("Layer {}/{} already cached: {}", i + 1, manifest.layers.len(), layer.digest);
+            debug!(
+                "Layer {}/{} already cached: {}",
+                i + 1,
+                manifest.layers.len(),
+                layer.digest
+            );
             continue;
         }
 
@@ -97,10 +102,7 @@ pub async fn pull_image(image: &str, cache_dir: &Path) -> Result<()> {
 
 /// Sanitize an image name for use as a directory name
 pub(crate) fn sanitize_image_name(image: &str) -> String {
-    image
-        .replace('/', "_")
-        .replace(':', "_")
-        .replace('@', "_")
+    image.replace('/', "_").replace(':', "_").replace('@', "_")
 }
 
 #[cfg(test)]
@@ -113,9 +115,6 @@ mod tests {
             sanitize_image_name("ghcr.io/archipelag-io/llm-chat:latest"),
             "ghcr.io_archipelag-io_llm-chat_latest"
         );
-        assert_eq!(
-            sanitize_image_name("alpine:3.18"),
-            "alpine_3.18"
-        );
+        assert_eq!(sanitize_image_name("alpine:3.18"), "alpine_3.18");
     }
 }

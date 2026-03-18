@@ -115,13 +115,21 @@ impl ExpertGate {
 
     /// Set per-layer gating weights. Each layer gets its own learned gating function.
     /// When routing, the layer_id parameter selects the appropriate weights.
-    pub fn set_per_layer_weights(&mut self, layer_weights: std::collections::HashMap<u32, NativeGatingWeights>) {
+    pub fn set_per_layer_weights(
+        &mut self,
+        layer_weights: std::collections::HashMap<u32, NativeGatingWeights>,
+    ) {
         self.per_layer_weights = layer_weights;
     }
 
     /// Route a token using per-layer gating weights for a specific layer.
     /// Falls back to shared native weights, then to the configured strategy.
-    pub fn route_for_layer(&self, token: &str, embedding: Option<&[f32]>, layer_id: u32) -> RoutingDecision {
+    pub fn route_for_layer(
+        &self,
+        token: &str,
+        embedding: Option<&[f32]>,
+        layer_id: u32,
+    ) -> RoutingDecision {
         // Try per-layer weights first
         if let Some(layer_weights) = self.per_layer_weights.get(&layer_id) {
             let token_id = token.bytes().next().map(|b| b as i32);
@@ -135,18 +143,28 @@ impl ExpertGate {
     }
 
     /// Route a token using native gating weights (when available).
-    fn route_native(&self, token_id: Option<i32>, embedding: Option<&[f32]>) -> Option<RoutingDecision> {
+    fn route_native(
+        &self,
+        token_id: Option<i32>,
+        embedding: Option<&[f32]>,
+    ) -> Option<RoutingDecision> {
         let weights = self.native_weights.as_ref()?;
         self.route_with_weights(weights, token_id, embedding)
     }
 
     /// Route a token using specific gating weights.
-    fn route_with_weights(&self, weights: &NativeGatingWeights, token_id: Option<i32>, embedding: Option<&[f32]>) -> Option<RoutingDecision> {
-
+    fn route_with_weights(
+        &self,
+        weights: &NativeGatingWeights,
+        token_id: Option<i32>,
+        embedding: Option<&[f32]>,
+    ) -> Option<RoutingDecision> {
         let expert_scores: Vec<f32> = match weights.input_mode {
             GatingInputMode::TokenLookup => {
                 let tid = token_id? as usize;
-                if tid >= weights.weights.len() { return None; }
+                if tid >= weights.weights.len() {
+                    return None;
+                }
                 weights.weights[tid].clone()
             }
             GatingInputMode::EmbeddingDot => {
@@ -175,7 +193,8 @@ impl ExpertGate {
         };
 
         // Top-K selection with softmax
-        let mut indexed: Vec<(u32, f32)> = expert_scores.iter()
+        let mut indexed: Vec<(u32, f32)> = expert_scores
+            .iter()
             .enumerate()
             .map(|(i, &s)| (i as u32, s))
             .collect();
@@ -184,12 +203,22 @@ impl ExpertGate {
         let k = self.active_experts as usize;
         let selected: Vec<(u32, f32)> = indexed.into_iter().take(k).collect();
 
-        let max_s = selected.iter().map(|(_, s)| *s).fold(f32::NEG_INFINITY, f32::max);
+        let max_s = selected
+            .iter()
+            .map(|(_, s)| *s)
+            .fold(f32::NEG_INFINITY, f32::max);
         let exp_sum: f32 = selected.iter().map(|(_, s)| (s - max_s).exp()).sum();
-        let weights_vec: Vec<f32> = selected.iter().map(|(_, s)| (s - max_s).exp() / exp_sum).collect();
+        let weights_vec: Vec<f32> = selected
+            .iter()
+            .map(|(_, s)| (s - max_s).exp() / exp_sum)
+            .collect();
         let expert_ids: Vec<u32> = selected.iter().map(|(id, _)| *id).collect();
 
-        Some(RoutingDecision { expert_ids, weights: weights_vec, strategy: GatingStrategy::Embedding })
+        Some(RoutingDecision {
+            expert_ids,
+            weights: weights_vec,
+            strategy: GatingStrategy::Embedding,
+        })
     }
 
     /// Route a token to top-K experts based on the current strategy.
@@ -225,21 +254,29 @@ impl ExpertGate {
 
         let mut expert_ids = Vec::with_capacity(self.active_experts as usize);
         for k in 0..self.active_experts {
-            let eid = ((hash.wrapping_add(k as u64 * 0x9e3779b97f4a7c15)) % self.total_experts as u64) as u32;
+            let eid = ((hash.wrapping_add(k as u64 * 0x9e3779b97f4a7c15))
+                % self.total_experts as u64) as u32;
             if !expert_ids.contains(&eid) {
                 expert_ids.push(eid);
             }
         }
         while expert_ids.len() < self.active_experts as usize {
             for e in 0..self.total_experts {
-                if !expert_ids.contains(&e) { expert_ids.push(e); break; }
+                if !expert_ids.contains(&e) {
+                    expert_ids.push(e);
+                    break;
+                }
             }
         }
 
         let uniform_weight = 1.0 / expert_ids.len() as f32;
         let weights = vec![uniform_weight; expert_ids.len()];
 
-        RoutingDecision { expert_ids, weights, strategy: GatingStrategy::Hash }
+        RoutingDecision {
+            expert_ids,
+            weights,
+            strategy: GatingStrategy::Hash,
+        }
     }
 
     /// Embedding-based routing: select experts whose centroids are closest
@@ -249,7 +286,9 @@ impl ExpertGate {
         }
 
         // Compute cosine similarity to each expert centroid
-        let mut similarities: Vec<(u32, f32)> = self.centroids.iter()
+        let mut similarities: Vec<(u32, f32)> = self
+            .centroids
+            .iter()
             .enumerate()
             .map(|(idx, centroid)| {
                 let sim = cosine_similarity(embedding, centroid);
@@ -265,17 +304,29 @@ impl ExpertGate {
         let selected: Vec<(u32, f32)> = similarities.into_iter().take(k).collect();
 
         // Softmax over selected similarities for routing weights
-        let max_sim = selected.iter().map(|(_, s)| *s).fold(f32::NEG_INFINITY, f32::max);
+        let max_sim = selected
+            .iter()
+            .map(|(_, s)| *s)
+            .fold(f32::NEG_INFINITY, f32::max);
         let exp_sum: f32 = selected.iter().map(|(_, s)| (s - max_sim).exp()).sum();
-        let weights: Vec<f32> = selected.iter().map(|(_, s)| (s - max_sim).exp() / exp_sum).collect();
+        let weights: Vec<f32> = selected
+            .iter()
+            .map(|(_, s)| (s - max_sim).exp() / exp_sum)
+            .collect();
         let expert_ids: Vec<u32> = selected.iter().map(|(id, _)| *id).collect();
 
-        RoutingDecision { expert_ids, weights, strategy: GatingStrategy::Embedding }
+        RoutingDecision {
+            expert_ids,
+            weights,
+            strategy: GatingStrategy::Embedding,
+        }
     }
 
     /// Round-robin routing: sequential expert assignment
     fn route_round_robin(&self) -> RoutingDecision {
-        let counter = self.rr_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let counter = self
+            .rr_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut expert_ids = Vec::with_capacity(self.active_experts as usize);
 
         for k in 0..self.active_experts {
@@ -286,7 +337,11 @@ impl ExpertGate {
         let uniform_weight = 1.0 / expert_ids.len() as f32;
         let weights = vec![uniform_weight; expert_ids.len()];
 
-        RoutingDecision { expert_ids, weights, strategy: GatingStrategy::RoundRobin }
+        RoutingDecision {
+            expert_ids,
+            weights,
+            strategy: GatingStrategy::RoundRobin,
+        }
     }
 }
 
@@ -330,10 +385,10 @@ mod tests {
 
         // Set centroids: 4 experts with distinct directions
         gate.set_centroids(vec![
-            vec![1.0, 0.0, 0.0],  // expert 0: x-axis
-            vec![0.0, 1.0, 0.0],  // expert 1: y-axis
-            vec![0.0, 0.0, 1.0],  // expert 2: z-axis
-            vec![1.0, 1.0, 0.0],  // expert 3: xy-diagonal
+            vec![1.0, 0.0, 0.0], // expert 0: x-axis
+            vec![0.0, 1.0, 0.0], // expert 1: y-axis
+            vec![0.0, 0.0, 1.0], // expert 2: z-axis
+            vec![1.0, 1.0, 0.0], // expert 3: xy-diagonal
         ]);
 
         assert_eq!(gate.strategy, GatingStrategy::Embedding);
@@ -391,7 +446,11 @@ mod tests {
 
     #[test]
     fn test_gating_strategy_serde_roundtrip() {
-        let strategies = vec![GatingStrategy::Hash, GatingStrategy::Embedding, GatingStrategy::RoundRobin];
+        let strategies = vec![
+            GatingStrategy::Hash,
+            GatingStrategy::Embedding,
+            GatingStrategy::RoundRobin,
+        ];
         for s in strategies {
             let json = serde_json::to_string(&s).unwrap();
             let deserialized: GatingStrategy = serde_json::from_str(&json).unwrap();
@@ -401,9 +460,18 @@ mod tests {
 
     #[test]
     fn test_gating_strategy_snake_case_names() {
-        assert_eq!(serde_json::to_string(&GatingStrategy::Hash).unwrap(), "\"hash\"");
-        assert_eq!(serde_json::to_string(&GatingStrategy::Embedding).unwrap(), "\"embedding\"");
-        assert_eq!(serde_json::to_string(&GatingStrategy::RoundRobin).unwrap(), "\"round_robin\"");
+        assert_eq!(
+            serde_json::to_string(&GatingStrategy::Hash).unwrap(),
+            "\"hash\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GatingStrategy::Embedding).unwrap(),
+            "\"embedding\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GatingStrategy::RoundRobin).unwrap(),
+            "\"round_robin\""
+        );
     }
 
     // --- cosine_similarity edge cases ---
@@ -503,8 +571,10 @@ mod tests {
     fn test_embedding_fallback_when_no_embedding_provided() {
         let mut gate = ExpertGate::new(GatingStrategy::Hash, 4, 2);
         gate.set_centroids(vec![
-            vec![1.0, 0.0], vec![0.0, 1.0],
-            vec![-1.0, 0.0], vec![0.0, -1.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![-1.0, 0.0],
+            vec![0.0, -1.0],
         ]);
         // Strategy is now Embedding, but no embedding provided → hash fallback
         let decision = gate.route("test", None);
@@ -522,7 +592,11 @@ mod tests {
         ]);
         let decision = gate.route("", Some(&[0.5, 0.5, 0.0]));
         let sum: f32 = decision.weights.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-5, "Weights should sum to 1.0, got {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "Weights should sum to 1.0, got {}",
+            sum
+        );
     }
 
     // --- set_centroids side effect ---
@@ -590,16 +664,22 @@ mod tests {
         layer1_weights[104] = vec![0.9, 0.2, 0.1]; // 'h' = 104
 
         let mut per_layer = std::collections::HashMap::new();
-        per_layer.insert(0, NativeGatingWeights {
-            weights: layer0_weights,
-            bias: None,
-            input_mode: GatingInputMode::TokenLookup,
-        });
-        per_layer.insert(1, NativeGatingWeights {
-            weights: layer1_weights,
-            bias: None,
-            input_mode: GatingInputMode::TokenLookup,
-        });
+        per_layer.insert(
+            0,
+            NativeGatingWeights {
+                weights: layer0_weights,
+                bias: None,
+                input_mode: GatingInputMode::TokenLookup,
+            },
+        );
+        per_layer.insert(
+            1,
+            NativeGatingWeights {
+                weights: layer1_weights,
+                bias: None,
+                input_mode: GatingInputMode::TokenLookup,
+            },
+        );
         gate.set_per_layer_weights(per_layer);
 
         let d0 = gate.route_for_layer("hi", None, 0);

@@ -39,7 +39,9 @@ pub(crate) fn compute_cpu_quota(cpu_percent: Option<u64>) -> Option<i64> {
 /// Parse complete lines from a buffer of streaming output.
 /// Returns the parsed `WorkloadOutput` items and the remaining (incomplete) buffer content.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn parse_output_lines(buffer: &str) -> (Vec<std::result::Result<WorkloadOutput, String>>, String) {
+pub(crate) fn parse_output_lines(
+    buffer: &str,
+) -> (Vec<std::result::Result<WorkloadOutput, String>>, String) {
     let mut results = Vec::new();
     let mut remaining = buffer.to_string();
 
@@ -90,7 +92,7 @@ pub async fn run_test_job(docker: &Docker, config: &AgentConfig, prompt: &str) -
         tmpfs_mounts,
         cpu_quota,
         network_disabled: limits.network_disabled,
-        sandbox_tier: None, // Test jobs bypass sandbox tier limits
+        sandbox_tier: None,    // Test jobs bypass sandbox tier limits
         seccomp_profile: None, // No seccomp for test jobs
     };
 

@@ -81,11 +81,7 @@ pub async fn execute_diffusers_job(
         .and_then(|v| v.as_u64())
         .unwrap_or(512) as usize;
 
-    let seed = job
-        .input
-        .get("seed")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(42);
+    let seed = job.input.get("seed").and_then(|v| v.as_u64()).unwrap_or(42);
 
     info!(
         "Diffusion params: prompt='{}', steps={}, guidance={}, {}x{}, seed={}",
@@ -166,7 +162,10 @@ pub async fn execute_diffusers_job(
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
         // Tokenize prompt
-        let pad_id = *tokenizer.get_vocab(true).get("<|endoftext|>").unwrap_or(&49407);
+        let pad_id = *tokenizer
+            .get_vocab(true)
+            .get("<|endoftext|>")
+            .unwrap_or(&49407);
         let max_len = 77; // CLIP max sequence length
 
         let tokens = tokenizer
@@ -221,8 +220,7 @@ pub async fn execute_diffusers_job(
         // Initialize random latents
         let latent_height = height / 8;
         let latent_width = width / 8;
-        let mut latents =
-            Tensor::randn(0f32, 1f32, (1, 4, latent_height, latent_width), &device)?;
+        let mut latents = Tensor::randn(0f32, 1f32, (1, 4, latent_height, latent_width), &device)?;
 
         // Scale initial noise by scheduler's init noise sigma
         latents = (latents * scheduler.init_noise_sigma())?;
@@ -237,8 +235,7 @@ pub async fn execute_diffusers_job(
             }
 
             let latent_model_input = Tensor::cat(&[&latents, &latents], 0)?;
-            let latent_model_input =
-                scheduler.scale_model_input(latent_model_input, timestep)?;
+            let latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)?;
 
             let noise_pred =
                 unet.forward(&latent_model_input, timestep as f64, &text_embeddings)?;
@@ -247,8 +244,8 @@ pub async fn execute_diffusers_job(
             let noise_pred = noise_pred.chunk(2, 0)?;
             let noise_pred_uncond = &noise_pred[0];
             let noise_pred_text = &noise_pred[1];
-            let noise_pred = (noise_pred_uncond
-                + ((noise_pred_text - noise_pred_uncond)? * guidance_scale)?)?;
+            let noise_pred =
+                (noise_pred_uncond + ((noise_pred_text - noise_pred_uncond)? * guidance_scale)?)?;
 
             latents = scheduler.step(&noise_pred, timestep, &latents)?;
 
@@ -305,22 +302,18 @@ pub async fn execute_diffusers_job(
 
     match result {
         Ok(png_data) => {
-            let b64 = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &png_data,
-            );
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_data);
 
-            nats.publish_image(
-                job_id,
-                &b64,
-                "png",
-                width as u32,
-                height as u32,
-                Some(seed),
-            )
-            .await?;
+            nats.publish_image(job_id, &b64, "png", width as u32, height as u32, Some(seed))
+                .await?;
             nats.publish_status(job_id, "succeeded", None).await?;
-            info!("Diffusers job {} completed: {}x{} PNG ({} bytes)", job_id, width, height, png_data.len());
+            info!(
+                "Diffusers job {} completed: {}x{} PNG ({} bytes)",
+                job_id,
+                width,
+                height,
+                png_data.len()
+            );
         }
         Err(e) => {
             let msg = format!("{}", e);

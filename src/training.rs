@@ -48,10 +48,18 @@ pub struct TrainingParams {
     pub dp_sigma: f64,
 }
 
-fn default_algorithm() -> String { "fed_avg".into() }
-fn default_local_epochs() -> u32 { 3 }
-fn default_learning_rate() -> f64 { 0.001 }
-fn default_batch_size() -> u32 { 32 }
+fn default_algorithm() -> String {
+    "fed_avg".into()
+}
+fn default_local_epochs() -> u32 {
+    3
+}
+fn default_learning_rate() -> f64 {
+    0.001
+}
+fn default_batch_size() -> u32 {
+    32
+}
 
 /// NATS subjects for federated training
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -73,12 +81,17 @@ pub async fn execute_training_job(
     let session_id = &config.session_id;
     let host_id = nats.host_id();
 
-    info!(session_id, host_id, "Starting federated training participant");
+    info!(
+        session_id,
+        host_id, "Starting federated training participant"
+    );
 
     // Download base model via cache
     let model_cache = {
         let st = state.read().await;
-        st.model_cache().context("Model cache not initialized")?.clone()
+        st.model_cache()
+            .context("Model cache not initialized")?
+            .clone()
     };
 
     if let Some(model_url) = job.model_url.as_deref() {
@@ -96,12 +109,17 @@ pub async fn execute_training_job(
             "host_id": host_id,
             "status": "ready",
         }))?,
-    ).await?;
+    )
+    .await?;
 
     // Subscribe to control and aggregate subjects
-    let mut control_sub = nats.subscribe_ring(&config.subjects.control).await
+    let mut control_sub = nats
+        .subscribe_ring(&config.subjects.control)
+        .await
         .context("Failed to subscribe to training control")?;
-    let mut aggregate_sub = nats.subscribe_ring(&config.subjects.aggregate).await
+    let mut aggregate_sub = nats
+        .subscribe_ring(&config.subjects.aggregate)
+        .await
         .context("Failed to subscribe to aggregate")?;
 
     info!(session_id, "Training participant ready, waiting for rounds");
@@ -285,8 +303,11 @@ mod tests {
     }
 
     fn decode_gradient(encoded: &str) -> Vec<f32> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
-        bytes.chunks(4)
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        bytes
+            .chunks(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -413,7 +434,10 @@ mod tests {
         let config = make_config(0.001, 32, 3);
         let g1 = compute_simulated_gradient(&config, 1);
         let g2 = compute_simulated_gradient(&config, 1);
-        assert_eq!(g1, g2, "same config + round should produce identical gradients");
+        assert_eq!(
+            g1, g2,
+            "same config + round should produce identical gradients"
+        );
     }
 
     #[test]
@@ -421,7 +445,10 @@ mod tests {
         let config = make_config(0.001, 32, 3);
         let g1 = compute_simulated_gradient(&config, 1);
         let g2 = compute_simulated_gradient(&config, 2);
-        assert_ne!(g1, g2, "different rounds should produce different gradients");
+        assert_ne!(
+            g1, g2,
+            "different rounds should produce different gradients"
+        );
     }
 
     #[test]
@@ -436,11 +463,18 @@ mod tests {
         let mag_high: f32 = g_high.iter().map(|g| g.abs()).sum();
 
         // Higher learning rate should produce larger magnitude gradients
-        assert!(mag_high > mag_low, "higher lr should produce larger gradient magnitude");
+        assert!(
+            mag_high > mag_low,
+            "higher lr should produce larger gradient magnitude"
+        );
 
         // The gradient is lr * 0.01 * sin(...), so ratio should be ~10x
         let ratio = mag_high / mag_low;
-        assert!((ratio - 10.0).abs() < 0.01, "magnitude ratio should be ~10x, got {}", ratio);
+        assert!(
+            (ratio - 10.0).abs() < 0.01,
+            "magnitude ratio should be ~10x, got {}",
+            ratio
+        );
     }
 
     #[test]
@@ -449,8 +483,10 @@ mod tests {
         let gradient = compute_simulated_gradient(&config, 1);
         // Each element is sin(...) * lr * 0.01, so bounded by lr * 0.01
         let bound = 0.001 * 0.01 + 1e-10;
-        assert!(gradient.iter().all(|g| g.abs() <= bound as f32),
-            "gradient values should be bounded by lr * 0.01");
+        assert!(
+            gradient.iter().all(|g| g.abs() <= bound as f32),
+            "gradient values should be bounded by lr * 0.01"
+        );
     }
 
     #[test]
@@ -458,8 +494,11 @@ mod tests {
         let config = make_config(0.001, 32, 3);
         for round in 0..10 {
             let gradient = compute_simulated_gradient(&config, round);
-            assert!(gradient.iter().all(|g| g.is_finite()),
-                "all gradient values must be finite for round {}", round);
+            assert!(
+                gradient.iter().all(|g| g.is_finite()),
+                "all gradient values must be finite for round {}",
+                round
+            );
         }
     }
 
@@ -470,7 +509,10 @@ mod tests {
         let config = make_config(0.001, 32, 3);
         let gradient = compute_lora_gradient(&config, 1);
         assert_eq!(gradient.len(), 1024);
-        assert!(gradient.iter().all(|g| *g == 0.0), "stub should return all zeros");
+        assert!(
+            gradient.iter().all(|g| *g == 0.0),
+            "stub should return all zeros"
+        );
     }
 
     // ── base64_encode_gradient ────────────────────────────────────
@@ -523,7 +565,9 @@ mod tests {
         let gradient = vec![1.0f32, 2.0, 3.0];
         let encoded = base64_encode_gradient(&gradient);
         // 3 floats * 4 bytes = 12 bytes, base64 of 12 bytes = 16 chars
-        let decoded_bytes = base64::engine::general_purpose::STANDARD.decode(&encoded).unwrap();
+        let decoded_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .unwrap();
         assert_eq!(decoded_bytes.len(), 12);
     }
 

@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::docker::ContainerOutput;
 use super::BundleConfig;
+use crate::docker::ContainerOutput;
 
 /// Generate an OCI runtime config.json in the bundle directory
 pub fn generate_config(bundle_dir: &Path, config: &BundleConfig) -> Result<()> {
@@ -181,7 +181,11 @@ pub async fn run(
     timeout_secs: u64,
     output_tx: mpsc::Sender<ContainerOutput>,
 ) -> Result<i64> {
-    info!("Running container {} via {}", container_id, runtime_path.display());
+    info!(
+        "Running container {} via {}",
+        container_id,
+        runtime_path.display()
+    );
 
     let mut child = tokio::process::Command::new(runtime_path)
         .arg("run")
@@ -253,7 +257,10 @@ pub async fn run(
         }
         Err(_) => {
             // Timeout — kill the container
-            warn!("Container {} timed out after {}s", container_id, timeout_secs);
+            warn!(
+                "Container {} timed out after {}s",
+                container_id, timeout_secs
+            );
             let _ = output_tx.send(ContainerOutput::Timeout).await;
 
             // Kill the process
@@ -303,7 +310,10 @@ mod tests {
         assert!(destinations.contains(&"/dev/pts"), "missing /dev/pts mount");
         assert!(destinations.contains(&"/dev/shm"), "missing /dev/shm mount");
         assert!(destinations.contains(&"/sys"), "missing /sys mount");
-        assert!(destinations.contains(&"/input.json"), "missing /input.json bind mount");
+        assert!(
+            destinations.contains(&"/input.json"),
+            "missing /input.json bind mount"
+        );
     }
 
     #[test]
@@ -316,7 +326,10 @@ mod tests {
         let arr = mounts.as_array().unwrap();
 
         let tmp_mount = arr.iter().find(|m| m["destination"] == "/tmp");
-        assert!(tmp_mount.is_some(), "should have /tmp mount when read_only_rootfs");
+        assert!(
+            tmp_mount.is_some(),
+            "should have /tmp mount when read_only_rootfs"
+        );
         assert_eq!(tmp_mount.unwrap()["type"], "tmpfs");
     }
 
@@ -330,7 +343,10 @@ mod tests {
         let arr = mounts.as_array().unwrap();
 
         let tmp_mount = arr.iter().find(|m| m["destination"] == "/tmp");
-        assert!(tmp_mount.is_none(), "should not have /tmp mount when rootfs is writable");
+        assert!(
+            tmp_mount.is_none(),
+            "should not have /tmp mount when rootfs is writable"
+        );
     }
 
     // --- build_resources tests ---
@@ -381,7 +397,10 @@ mod tests {
         let arr = ns.as_array().unwrap();
 
         let types: Vec<&str> = arr.iter().filter_map(|n| n["type"].as_str()).collect();
-        assert!(types.contains(&"network"), "should include network namespace when disabled");
+        assert!(
+            types.contains(&"network"),
+            "should include network namespace when disabled"
+        );
     }
 
     #[test]
@@ -394,7 +413,10 @@ mod tests {
         let arr = ns.as_array().unwrap();
 
         let types: Vec<&str> = arr.iter().filter_map(|n| n["type"].as_str()).collect();
-        assert!(!types.contains(&"network"), "should not include network namespace when enabled");
+        assert!(
+            !types.contains(&"network"),
+            "should not include network namespace when enabled"
+        );
         // Base namespaces always present
         assert!(types.contains(&"pid"));
         assert!(types.contains(&"mount"));

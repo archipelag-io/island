@@ -112,8 +112,13 @@ pub fn approximate_layer_forward(
         let max_tok = context_size as i32;
         let mut tokens = vec![0i32; max_tok as usize];
         let n = llama_cpp_sys::llama_tokenize(
-            model, c_text.as_ptr(), input_text.len() as i32,
-            tokens.as_mut_ptr(), max_tok, true, false,
+            model,
+            c_text.as_ptr(),
+            input_text.len() as i32,
+            tokens.as_mut_ptr(),
+            max_tok,
+            true,
+            false,
         );
 
         if n < 0 {

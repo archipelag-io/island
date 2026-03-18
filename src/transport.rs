@@ -100,25 +100,31 @@ impl TransportSender {
                         if mode == TransportMode::QuicWithRelay {
                             info!("QUIC to {} failed ({}), using NATS relay", addr, e);
                         } else {
-                            warn!("QUIC transport to {} failed: {}, falling back to NATS", addr, e);
+                            warn!(
+                                "QUIC transport to {} failed: {}, falling back to NATS",
+                                addr, e
+                            );
                         }
-                        Ok(TransportSender::Nats { subject: nats_subject })
+                        Ok(TransportSender::Nats {
+                            subject: nats_subject,
+                        })
                     }
                 }
             }
-            TransportMode::Nats => Ok(TransportSender::Nats { subject: nats_subject }),
+            TransportMode::Nats => Ok(TransportSender::Nats {
+                subject: nats_subject,
+            }),
         }
     }
 
     /// Send activation data to the next position
     pub async fn send(&self, nats: &NatsAgent, data: Vec<u8>) -> Result<()> {
         match self {
-            TransportSender::Nats { subject } => {
-                nats.publish_raw(subject, data).await
-            }
-            TransportSender::Quic { tx } => {
-                tx.send(data).await.map_err(|_| anyhow::anyhow!("QUIC send channel closed"))
-            }
+            TransportSender::Nats { subject } => nats.publish_raw(subject, data).await,
+            TransportSender::Quic { tx } => tx
+                .send(data)
+                .await
+                .map_err(|_| anyhow::anyhow!("QUIC send channel closed")),
         }
     }
 
@@ -140,27 +146,31 @@ pub enum TransportReceiver {
 impl TransportReceiver {
     /// Create a NATS-based receiver
     pub async fn nats(nats: &NatsAgent, subject: &str) -> Result<Self> {
-        let sub = nats.subscribe_ring(subject).await
+        let sub = nats
+            .subscribe_ring(subject)
+            .await
             .context("Failed to subscribe to activation subject")?;
         Ok(TransportReceiver::Nats { sub })
     }
 
     /// Create a receiver, optionally starting a QUIC listener.
     /// Falls back to NATS if QUIC listener fails (relay mode).
-    pub async fn new(nats: &NatsAgent, nats_subject: &str, listen_addr: Option<&str>) -> Result<Self> {
+    pub async fn new(
+        nats: &NatsAgent,
+        nats_subject: &str,
+        listen_addr: Option<&str>,
+    ) -> Result<Self> {
         match listen_addr {
-            Some(addr) => {
-                match create_quic_listener(addr).await {
-                    Ok(rx) => {
-                        info!("QUIC listener bound on {}", addr);
-                        Ok(TransportReceiver::Quic { rx })
-                    }
-                    Err(e) => {
-                        info!("QUIC listener on {} failed ({}), using NATS relay", addr, e);
-                        Self::nats(nats, nats_subject).await
-                    }
+            Some(addr) => match create_quic_listener(addr).await {
+                Ok(rx) => {
+                    info!("QUIC listener bound on {}", addr);
+                    Ok(TransportReceiver::Quic { rx })
                 }
-            }
+                Err(e) => {
+                    info!("QUIC listener on {} failed ({}), using NATS relay", addr, e);
+                    Self::nats(nats, nats_subject).await
+                }
+            },
             None => Self::nats(nats, nats_subject).await,
         }
     }
@@ -168,12 +178,8 @@ impl TransportReceiver {
     /// Receive the next activation message. Returns None if the stream is closed.
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         match self {
-            TransportReceiver::Nats { sub } => {
-                sub.next().await.map(|msg| msg.payload.to_vec())
-            }
-            TransportReceiver::Quic { rx } => {
-                rx.recv().await
-            }
+            TransportReceiver::Nats { sub } => sub.next().await.map(|msg| msg.payload.to_vec()),
+            TransportReceiver::Quic { rx } => rx.recv().await,
         }
     }
 }
@@ -185,19 +191,23 @@ impl TransportReceiver {
 /// Generate a self-signed TLS certificate for QUIC connections.
 /// Islands use ephemeral self-signed certs — mutual TLS is not required
 /// because activation data is not secret (the model weights are public).
-fn generate_self_signed_cert() -> Result<(rustls::pki_types::CertificateDer<'static>, rustls::pki_types::PrivateKeyDer<'static>)> {
+fn generate_self_signed_cert() -> Result<(
+    rustls::pki_types::CertificateDer<'static>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
     let cert = rcgen::generate_simple_self_signed(vec!["island.local".to_string()])
         .context("Failed to generate self-signed cert")?;
     let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der())
+        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
     );
     Ok((cert_der, key_der))
 }
 
 /// Create a QUIC sender that connects to a peer Island
 async fn create_quic_sender(addr: &str) -> Result<mpsc::Sender<Vec<u8>>> {
-    let peer_addr: SocketAddr = addr.parse()
+    let peer_addr: SocketAddr = addr
+        .parse()
         .with_context(|| format!("Invalid peer address: {}", addr))?;
 
     // Client config: skip server cert verification (self-signed peer certs)
@@ -208,7 +218,7 @@ async fn create_quic_sender(addr: &str) -> Result<mpsc::Sender<Vec<u8>>> {
 
     let client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-            .context("Failed to create QUIC client config")?
+            .context("Failed to create QUIC client config")?,
     ));
 
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
@@ -227,8 +237,12 @@ async fn create_quic_sender(addr: &str) -> Result<mpsc::Sender<Vec<u8>>> {
             match connection.open_uni().await {
                 Ok(mut stream) => {
                     let len = (data.len() as u32).to_le_bytes();
-                    if stream.write_all(&len).await.is_err() { break; }
-                    if stream.write_all(&data).await.is_err() { break; }
+                    if stream.write_all(&len).await.is_err() {
+                        break;
+                    }
+                    if stream.write_all(&data).await.is_err() {
+                        break;
+                    }
                     let _ = stream.finish();
                 }
                 Err(e) => {
@@ -244,7 +258,8 @@ async fn create_quic_sender(addr: &str) -> Result<mpsc::Sender<Vec<u8>>> {
 
 /// Create a QUIC listener that accepts activation data from peer Islands
 async fn create_quic_listener(addr: &str) -> Result<mpsc::Receiver<Vec<u8>>> {
-    let listen_addr: SocketAddr = addr.parse()
+    let listen_addr: SocketAddr = addr
+        .parse()
         .with_context(|| format!("Invalid listen address: {}", addr))?;
 
     let (cert_der, key_der) = generate_self_signed_cert()?;
@@ -256,7 +271,7 @@ async fn create_quic_listener(addr: &str) -> Result<mpsc::Receiver<Vec<u8>>> {
 
     let server_config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-            .context("Failed to create QUIC server config")?
+            .context("Failed to create QUIC server config")?,
     ));
 
     let endpoint = quinn::Endpoint::server(server_config, listen_addr)?;
@@ -272,14 +287,22 @@ async fn create_quic_listener(addr: &str) -> Result<mpsc::Receiver<Vec<u8>>> {
                     while let Ok(mut stream) = connection.accept_uni().await {
                         // Read length-prefixed message
                         let mut len_buf = [0u8; 4];
-                        if stream.read_exact(&mut len_buf).await.is_err() { continue; }
+                        if stream.read_exact(&mut len_buf).await.is_err() {
+                            continue;
+                        }
                         let len = u32::from_le_bytes(len_buf) as usize;
-                        if len > 64 * 1024 * 1024 { continue; } // 64MB max
+                        if len > 64 * 1024 * 1024 {
+                            continue;
+                        } // 64MB max
 
                         let mut data = vec![0u8; len];
-                        if stream.read_exact(&mut data).await.is_err() { continue; }
+                        if stream.read_exact(&mut data).await.is_err() {
+                            continue;
+                        }
 
-                        if tx.send(data).await.is_err() { break; }
+                        if tx.send(data).await.is_err() {
+                            break;
+                        }
                     }
                 }
             });
@@ -364,7 +387,11 @@ mod tests {
 
     #[test]
     fn test_transport_mode_serialize_roundtrip() {
-        for mode in [TransportMode::Nats, TransportMode::Quic, TransportMode::QuicWithRelay] {
+        for mode in [
+            TransportMode::Nats,
+            TransportMode::Quic,
+            TransportMode::QuicWithRelay,
+        ] {
             let json = serde_json::to_string(&mode).unwrap();
             let restored: TransportMode = serde_json::from_str(&json).unwrap();
             assert_eq!(mode, restored);
@@ -530,7 +557,10 @@ mod tests {
         assert!(!cert_der.is_empty(), "Certificate DER should not be empty");
         match &key_der {
             rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8) => {
-                assert!(!pkcs8.secret_pkcs8_der().is_empty(), "Private key should not be empty");
+                assert!(
+                    !pkcs8.secret_pkcs8_der().is_empty(),
+                    "Private key should not be empty"
+                );
             }
             _ => panic!("Expected PKCS8 key format"),
         }
@@ -549,7 +579,10 @@ mod tests {
             rustls::pki_types::PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
             _ => panic!("Expected PKCS8"),
         };
-        assert_ne!(k1_bytes, k2_bytes, "Each cert generation should produce unique keys");
+        assert_ne!(
+            k1_bytes, k2_bytes,
+            "Each cert generation should produce unique keys"
+        );
     }
 
     // ── Address parsing (used internally by create_quic_sender/listener) ──

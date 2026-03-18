@@ -55,10 +55,7 @@ impl OciManager {
         }
 
         // 2. Check system PATH
-        if let Ok(output) = std::process::Command::new("which")
-            .arg("crun")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("which").arg("crun").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -69,10 +66,7 @@ impl OciManager {
         }
 
         // 3. Also accept runc as fallback
-        if let Ok(output) = std::process::Command::new("which")
-            .arg("runc")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("which").arg("runc").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {

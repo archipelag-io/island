@@ -36,8 +36,12 @@ pub fn split_model(input: &Path, shard_count: usize, output_dir: &Path) -> Resul
     }
 
     // Create output directory
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
 
     let file_size = std::fs::metadata(input)
         .with_context(|| format!("Failed to read model file: {}", input.display()))?
@@ -83,19 +87,18 @@ pub fn split_model(input: &Path, shard_count: usize, output_dir: &Path) -> Resul
         let mut bytes_written: u64 = 0;
 
         while bytes_written < this_shard_size {
-            let to_read = std::cmp::min(
-                buf.len() as u64,
-                this_shard_size - bytes_written,
-            ) as usize;
+            let to_read = std::cmp::min(buf.len() as u64, this_shard_size - bytes_written) as usize;
 
-            let n = source.read(&mut buf[..to_read])
+            let n = source
+                .read(&mut buf[..to_read])
                 .context("Failed to read from source model")?;
 
             if n == 0 {
                 break;
             }
 
-            shard_file.write_all(&buf[..n])
+            shard_file
+                .write_all(&buf[..n])
                 .context("Failed to write shard data")?;
             hasher.update(&buf[..n]);
             bytes_written += n as u64;

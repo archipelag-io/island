@@ -102,14 +102,12 @@ pub fn detect_tee() -> TeeInfo {
 
 /// Check for Intel SGX device
 fn check_sgx() -> bool {
-    std::path::Path::new("/dev/sgx_enclave").exists()
-        || std::path::Path::new("/dev/isgx").exists()
+    std::path::Path::new("/dev/sgx_enclave").exists() || std::path::Path::new("/dev/isgx").exists()
 }
 
 /// Check for AMD SEV device
 fn check_sev() -> bool {
-    std::path::Path::new("/dev/sev").exists()
-        || std::path::Path::new("/dev/sev-guest").exists()
+    std::path::Path::new("/dev/sev").exists() || std::path::Path::new("/dev/sev-guest").exists()
 }
 
 /// Check for ARM TrustZone device

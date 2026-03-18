@@ -58,20 +58,28 @@ pub async fn execute_expert_job(
     let role = &expert_config.role;
 
     info!(
-        job_id, group_id, role,
+        job_id,
+        group_id,
+        role,
         "Starting expert execution (position {}, {} total experts, top-{} active)",
-        expert_config.position, expert_config.total_experts, expert_config.active_experts,
+        expert_config.position,
+        expert_config.total_experts,
+        expert_config.active_experts,
     );
 
     // Download model (router model or expert shard)
     let model_url = if role == "router" {
-        expert_config.shard_spec.get("router_url")
+        expert_config
+            .shard_spec
+            .get("router_url")
             .and_then(|v| v.as_str())
             .or(job.model_url.as_deref())
             .context("Router missing model URL")?
     } else {
         // Expert: use first expert_url from shard_spec
-        expert_config.shard_spec.get("expert_urls")
+        expert_config
+            .shard_spec
+            .get("expert_urls")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
@@ -81,7 +89,9 @@ pub async fn execute_expert_job(
 
     let model_cache = {
         let st = state.read().await;
-        st.model_cache().context("Model cache not initialized")?.clone()
+        st.model_cache()
+            .context("Model cache not initialized")?
+            .clone()
     };
 
     info!(job_id, role, "Downloading model: {}", model_url);
@@ -100,10 +110,13 @@ pub async fn execute_expert_job(
 
         match tokio::task::spawn_blocking(move || {
             crate::gguf_format::extract_all_gating_weights(std::path::Path::new(&mp))
-        }).await {
+        })
+        .await
+        {
             Ok(Ok(gating_data)) if !gating_data.is_empty() => {
                 info!(
-                    job_id, "Extracted per-layer MoE gating weights from {} layers",
+                    job_id,
+                    "Extracted per-layer MoE gating weights from {} layers",
                     gating_data.len()
                 );
 
@@ -125,7 +138,11 @@ pub async fn execute_expert_job(
                     per_layer.insert(gwd.layer_id, weights);
                 }
 
-                info!(job_id, "Installed per-layer gating for {} layers", per_layer.len());
+                info!(
+                    job_id,
+                    "Installed per-layer gating for {} layers",
+                    per_layer.len()
+                );
                 gate.set_per_layer_weights(per_layer);
                 Some(gate)
             }
@@ -138,7 +155,10 @@ pub async fn execute_expert_job(
                 ))
             }
             Ok(Err(e)) => {
-                info!(job_id, "Gating extraction failed: {} — using hash-based routing", e);
+                info!(
+                    job_id,
+                    "Gating extraction failed: {} — using hash-based routing", e
+                );
                 Some(crate::gating::ExpertGate::new(
                     crate::gating::GatingStrategy::Hash,
                     total_experts,
@@ -146,7 +166,10 @@ pub async fn execute_expert_job(
                 ))
             }
             Err(e) => {
-                info!(job_id, "Gating task failed: {} — using hash-based routing", e);
+                info!(
+                    job_id,
+                    "Gating task failed: {} — using hash-based routing", e
+                );
                 Some(crate::gating::ExpertGate::new(
                     crate::gating::GatingStrategy::Hash,
                     total_experts,
@@ -167,9 +190,13 @@ pub async fn execute_expert_job(
             "role": role,
             "position": expert_config.position,
         }))?,
-    ).await?;
+    )
+    .await?;
 
-    info!(job_id, role, "Expert member signaled ready, waiting for start");
+    info!(
+        job_id,
+        role, "Expert member signaled ready, waiting for start"
+    );
 
     // Subscribe to control
     let mut control_sub = nats
@@ -208,8 +235,20 @@ pub async fn execute_expert_job(
     info!(job_id, role, "Expert session started");
 
     match role.as_str() {
-        "router" => execute_router(nats, job, &expert_config, expert_gate, &mut control_sub, cancel_rx).await,
-        "expert" => execute_expert_member(nats, job, &expert_config, &mut control_sub, cancel_rx).await,
+        "router" => {
+            execute_router(
+                nats,
+                job,
+                &expert_config,
+                expert_gate,
+                &mut control_sub,
+                cancel_rx,
+            )
+            .await
+        }
+        "expert" => {
+            execute_expert_member(nats, job, &expert_config, &mut control_sub, cancel_rx).await
+        }
         _ => anyhow::bail!("Unknown expert role: {}", role),
     }
 }
@@ -235,7 +274,11 @@ async fn execute_router(
 
     let context_size = job.model_context_size.unwrap_or(2048);
     let temperature = job.model_temperature.unwrap_or(0.7);
-    let max_tokens = job.input.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1024) as usize;
+    let max_tokens = job
+        .input
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024) as usize;
 
     // Wait for the prompt on control channel
     let prompt = loop {
@@ -300,7 +343,9 @@ async fn execute_router(
 
     // Run inference — for now, router generates tokens directly
     // TODO: implement actual gating network + expert dispatch when MoE model format is supported
-    let model_url = config.shard_spec.get("router_url")
+    let model_url = config
+        .shard_spec
+        .get("router_url")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -324,29 +369,41 @@ async fn execute_router(
         let mut sp = SessionParams::default();
         sp.n_ctx = context_size;
 
-        let mut session = model.create_session(sp)
+        let mut session = model
+            .create_session(sp)
             .map_err(|e| anyhow::anyhow!("Session error: {:?}", e))?;
 
-        session.advance_context(&prompt)
+        session
+            .advance_context(&prompt)
             .map_err(|e| anyhow::anyhow!("Prompt error: {:?}", e))?;
 
         let sampler = StandardSampler::new_softmax(
             vec![
-                SamplerStage::RepetitionPenalty { repetition_penalty: 1.1, frequency_penalty: 0.0, presence_penalty: 0.0, last_n: 64 },
+                SamplerStage::RepetitionPenalty {
+                    repetition_penalty: 1.1,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    last_n: 64,
+                },
                 SamplerStage::TopP(0.9),
                 SamplerStage::Temperature(temperature),
             ],
             1,
         );
 
-        let completions = session.start_completing_with(sampler, max_tokens)
+        let completions = session
+            .start_completing_with(sampler, max_tokens)
             .map_err(|e| anyhow::anyhow!("Completion error: {:?}", e))?;
 
         let mut count: u64 = 0;
         for token in completions.into_strings() {
-            if *cancel.borrow() { break; }
+            if *cancel.borrow() {
+                break;
+            }
             count += 1;
-            if tx.blocking_send(token.to_string()).is_err() { break; }
+            if tx.blocking_send(token.to_string()).is_err() {
+                break;
+            }
         }
         Ok::<u64, anyhow::Error>(count)
     });
@@ -388,7 +445,8 @@ async fn execute_router(
                         "tokens": batch,
                         "seq": seq,
                     });
-                    nats.publish_raw(&subj, serde_json::to_vec(&batch_payload)?).await?;
+                    nats.publish_raw(&subj, serde_json::to_vec(&batch_payload)?)
+                        .await?;
                     dispatched += batch.len() as u64;
                 }
             }
@@ -401,10 +459,8 @@ async fn execute_router(
             "is_final": false,
             "seq": seq,
         });
-        nats.publish_raw(
-            &config.expert_subjects.output,
-            serde_json::to_vec(&output)?,
-        ).await?;
+        nats.publish_raw(&config.expert_subjects.output, serde_json::to_vec(&output)?)
+            .await?;
     }
 
     // Flush remaining expert batches
@@ -414,7 +470,8 @@ async fn execute_router(
             "tokens": batch,
             "seq": seq,
         });
-        nats.publish_raw(&subj, serde_json::to_vec(&batch_payload)?).await?;
+        nats.publish_raw(&subj, serde_json::to_vec(&batch_payload)?)
+            .await?;
         dispatched += batch.len() as u64;
     }
 
@@ -432,15 +489,20 @@ async fn execute_router(
     nats.publish_raw(
         &config.expert_subjects.output,
         serde_json::to_vec(&final_output)?,
-    ).await?;
+    )
+    .await?;
 
     // Signal completion
     nats.publish_raw(
         &config.expert_subjects.status,
         serde_json::to_vec(&serde_json::json!({"status": "complete"}))?,
-    ).await?;
+    )
+    .await?;
 
-    info!(job_id, "Router completed: {} tokens ({} dispatched to experts)", token_count, dispatched);
+    info!(
+        job_id,
+        "Router completed: {} tokens ({} dispatched to experts)", token_count, dispatched
+    );
     Ok(())
 }
 
@@ -464,7 +526,8 @@ fn hash_gate_select(token: &str, total_experts: u32, active_experts: u32) -> Vec
     // Select top-K experts via hash partitioning
     let mut selected = Vec::with_capacity(active_experts as usize);
     for k in 0..active_experts {
-        let expert_id = ((hash.wrapping_add(k as u64 * 0x9e3779b97f4a7c15)) % total_experts as u64) as u32;
+        let expert_id =
+            ((hash.wrapping_add(k as u64 * 0x9e3779b97f4a7c15)) % total_experts as u64) as u32;
         if !selected.contains(&expert_id) {
             selected.push(expert_id);
         }
@@ -498,8 +561,15 @@ impl ExpertBatcher {
     }
 
     /// Add a token to the batch for a subject. Returns the batch if full.
-    fn add(&mut self, subject: &str, token: serde_json::Value) -> Option<(String, Vec<serde_json::Value>)> {
-        let batch = self.batches.entry(subject.to_string()).or_insert_with(Vec::new);
+    fn add(
+        &mut self,
+        subject: &str,
+        token: serde_json::Value,
+    ) -> Option<(String, Vec<serde_json::Value>)> {
+        let batch = self
+            .batches
+            .entry(subject.to_string())
+            .or_insert_with(Vec::new);
         batch.push(token);
 
         if batch.len() >= self.batch_size {
@@ -512,7 +582,8 @@ impl ExpertBatcher {
 
     /// Flush all remaining batches (called at end of generation)
     fn flush_all(&mut self) -> Vec<(String, Vec<serde_json::Value>)> {
-        self.batches.drain()
+        self.batches
+            .drain()
             .filter(|(_, batch)| !batch.is_empty())
             .collect()
     }
@@ -529,7 +600,9 @@ async fn execute_expert_member(
 ) -> Result<()> {
     let job_id = &job.job_id;
     let group_id = &config.group_id;
-    let expert_ids: Vec<i64> = config.shard_spec.get("expert_ids")
+    let expert_ids: Vec<i64> = config
+        .shard_spec
+        .get("expert_ids")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
         .unwrap_or_default();
@@ -539,7 +612,9 @@ async fn execute_expert_member(
     // Subscribe to each expert dispatch subject
     let mut expert_subs = Vec::new();
     for (eid_str, subject) in &config.expert_subjects.dispatch {
-        let sub = nats.subscribe_ring(subject).await
+        let sub = nats
+            .subscribe_ring(subject)
+            .await
             .with_context(|| format!("Failed to subscribe to expert {}", eid_str))?;
         expert_subs.push((eid_str.clone(), sub));
     }
@@ -554,7 +629,10 @@ async fn execute_expert_member(
         combined_subs.push(sub);
     }
 
-    info!(job_id, "Expert member processing tokens for experts {:?}", expert_ids);
+    info!(
+        job_id,
+        "Expert member processing tokens for experts {:?}", expert_ids
+    );
 
     loop {
         // Check all expert subscriptions for incoming token batches
@@ -618,7 +696,9 @@ async fn execute_expert_member(
                 }
             }
 
-            if received_batch { break; } // Process one batch then re-check control
+            if received_batch {
+                break;
+            } // Process one batch then re-check control
         }
 
         if !received_batch {
@@ -727,7 +807,12 @@ mod tests {
         let config: ExpertConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.role, "expert");
         assert_eq!(config.position, 1);
-        let expert_ids = config.shard_spec.get("expert_ids").unwrap().as_array().unwrap();
+        let expert_ids = config
+            .shard_spec
+            .get("expert_ids")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(expert_ids.len(), 4);
     }
 }

@@ -3,7 +3,7 @@
 //! Every token emitted by a workload container is parsed through this path,
 //! so deserialization performance directly affects streaming latency.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 // Re-define the types here since they're in a binary crate.
 // These must stay in sync with src/messages.rs.
@@ -13,9 +13,16 @@ use serde::Deserialize;
 #[serde(tag = "type")]
 #[serde(rename_all = "lowercase")]
 pub enum WorkloadOutput {
-    Status { message: String },
-    Token { content: String },
-    Progress { step: u32, total: u32 },
+    Status {
+        message: String,
+    },
+    Token {
+        content: String,
+    },
+    Progress {
+        step: u32,
+        total: u32,
+    },
     Image {
         data: String,
         format: String,
@@ -28,7 +35,9 @@ pub enum WorkloadOutput {
         #[serde(default)]
         seed: Option<u64>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -42,8 +51,7 @@ fn bench_token_parsing(c: &mut Criterion) {
 
     c.bench_function("parse_token_short", |b| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(token_json)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(token_json)).unwrap();
         })
     });
 
@@ -55,8 +63,7 @@ fn bench_token_parsing(c: &mut Criterion) {
 
     c.bench_function("parse_token_long", |b| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(&long_token)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(&long_token)).unwrap();
         })
     });
 }
@@ -66,8 +73,7 @@ fn bench_status_parsing(c: &mut Criterion) {
 
     c.bench_function("parse_status", |b| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(status_json)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(status_json)).unwrap();
         })
     });
 }
@@ -79,15 +85,13 @@ fn bench_done_parsing(c: &mut Criterion) {
 
     c.bench_function("parse_done_simple", |b| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(done_simple)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(done_simple)).unwrap();
         })
     });
 
     c.bench_function("parse_done_with_usage", |b| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(done_with_usage)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(done_with_usage)).unwrap();
         })
     });
 }
@@ -110,26 +114,28 @@ fn bench_image_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_image");
     group.bench_with_input(BenchmarkId::new("1KB", "small"), &small_image, |b, json| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(json)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(json)).unwrap();
         })
     });
-    group.bench_with_input(BenchmarkId::new("500KB", "large"), &large_image, |b, json| {
-        b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(json)).unwrap();
-        })
-    });
+    group.bench_with_input(
+        BenchmarkId::new("500KB", "large"),
+        &large_image,
+        |b, json| {
+            b.iter(|| {
+                let _output: WorkloadOutput = serde_json::from_str(black_box(json)).unwrap();
+            })
+        },
+    );
     group.finish();
 }
 
 fn bench_error_parsing(c: &mut Criterion) {
-    let error_json = r#"{"type":"error","message":"OOM killed: container exceeded 4GB memory limit"}"#;
+    let error_json =
+        r#"{"type":"error","message":"OOM killed: container exceeded 4GB memory limit"}"#;
 
     c.bench_function("parse_error", |b| {
         b.iter(|| {
-            let _output: WorkloadOutput =
-                serde_json::from_str(black_box(error_json)).unwrap();
+            let _output: WorkloadOutput = serde_json::from_str(black_box(error_json)).unwrap();
         })
     });
 }

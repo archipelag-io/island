@@ -59,14 +59,14 @@ pub struct TensorInfo {
 /// GGML data type sizes in bytes per element (partial — covers common quantizations)
 fn ggml_type_size(dtype: u32) -> f64 {
     match dtype {
-        0 => 4.0,   // F32
-        1 => 2.0,   // F16
-        2 => 0.5625, // Q4_0 (4.5 bits per weight average)
-        3 => 0.625,  // Q4_1
-        6 => 0.5625, // Q5_0
-        7 => 0.625,  // Q5_1
-        8 => 1.0,    // Q8_0
-        9 => 1.0,    // Q8_1
+        0 => 4.0,     // F32
+        1 => 2.0,     // F16
+        2 => 0.5625,  // Q4_0 (4.5 bits per weight average)
+        3 => 0.625,   // Q4_1
+        6 => 0.5625,  // Q5_0
+        7 => 0.625,   // Q5_1
+        8 => 1.0,     // Q8_0
+        9 => 1.0,     // Q8_1
         10 => 0.5625, // Q2_K
         11 => 0.625,  // Q3_K
         12 => 0.5625, // Q4_K
@@ -133,7 +133,11 @@ pub fn parse_gguf(path: &Path) -> Result<GgufFile> {
     // 2. Version
     let version = read_u32(&mut file)?;
     if version != GGUF_VERSION {
-        anyhow::bail!("Unsupported GGUF version: {} (expected {})", version, GGUF_VERSION);
+        anyhow::bail!(
+            "Unsupported GGUF version: {} (expected {})",
+            version,
+            GGUF_VERSION
+        );
     }
 
     // 3. Tensor count
@@ -152,8 +156,10 @@ pub fn parse_gguf(path: &Path) -> Result<GgufFile> {
             // uint32
             if kv.raw_bytes.len() >= 4 {
                 alignment = u32::from_le_bytes([
-                    kv.raw_bytes[0], kv.raw_bytes[1],
-                    kv.raw_bytes[2], kv.raw_bytes[3],
+                    kv.raw_bytes[0],
+                    kv.raw_bytes[1],
+                    kv.raw_bytes[2],
+                    kv.raw_bytes[3],
                 ]) as usize;
             }
         }
@@ -208,7 +214,9 @@ pub fn split_by_layers(
     let gguf = parse_gguf(source_path)?;
 
     // Determine total layer count from tensor names
-    let max_layer = gguf.tensors.iter()
+    let max_layer = gguf
+        .tensors
+        .iter()
         .filter_map(|t| t.layer_id)
         .max()
         .unwrap_or(31);
@@ -222,7 +230,8 @@ pub fn split_by_layers(
         gguf.tensor_count, total_layers, shard_count
     );
 
-    let stem = source_path.file_stem()
+    let stem = source_path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("model");
 
@@ -237,7 +246,9 @@ pub fn split_by_layers(
         let layer_end = layer_offset + shard_layers - 1;
 
         // Filter tensors for this shard
-        let shard_tensors: Vec<&TensorInfo> = gguf.tensors.iter()
+        let shard_tensors: Vec<&TensorInfo> = gguf
+            .tensors
+            .iter()
             .filter(|t| tensor_placement(&t.name, layer_start, layer_end, total_layers))
             .collect();
 
@@ -257,8 +268,12 @@ pub fn split_by_layers(
 
         info!(
             "  Shard {}: layers {}-{} ({} tensors, {:.1} MB, {})",
-            i, layer_start, layer_end, shard_tensors.len(),
-            file_size as f64 / 1_048_576.0, &hash[..20]
+            i,
+            layer_start,
+            layer_end,
+            shard_tensors.len(),
+            file_size as f64 / 1_048_576.0,
+            &hash[..20]
         );
 
         shard_infos.push(ShardManifestEntry {
@@ -278,7 +293,10 @@ pub fn split_by_layers(
     let manifest_path = output_dir.join("shard_manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
 
-    info!("Layer-aware manifest written to {}", manifest_path.display());
+    info!(
+        "Layer-aware manifest written to {}",
+        manifest_path.display()
+    );
     Ok(manifest_path)
 }
 
@@ -367,7 +385,9 @@ fn write_shard_gguf(
         while remaining > 0 {
             let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
             let n = source_file.read(&mut buf[..to_read])?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             out.write_all(&buf[..n])?;
             hasher.update(&buf[..n]);
             remaining -= n as u64;
@@ -427,20 +447,33 @@ fn build_manifest(
     shard_count: usize,
     shards: &[ShardManifestEntry],
 ) -> serde_json::Value {
-    let shard_urls: serde_json::Map<String, serde_json::Value> = shards.iter()
-        .map(|s| (s.index.to_string(), serde_json::json!(format!("https://YOUR_CDN/{}", s.filename))))
+    let shard_urls: serde_json::Map<String, serde_json::Value> = shards
+        .iter()
+        .map(|s| {
+            (
+                s.index.to_string(),
+                serde_json::json!(format!("https://YOUR_CDN/{}", s.filename)),
+            )
+        })
         .collect();
 
-    let shard_hashes: serde_json::Map<String, serde_json::Value> = shards.iter()
+    let shard_hashes: serde_json::Map<String, serde_json::Value> = shards
+        .iter()
         .map(|s| (s.index.to_string(), serde_json::json!(&s.hash)))
         .collect();
 
-    let shard_layers: serde_json::Map<String, serde_json::Value> = shards.iter()
-        .map(|s| (s.index.to_string(), serde_json::json!({
-            "layer_start": s.layer_start,
-            "layer_end": s.layer_end,
-            "tensor_count": s.tensor_count,
-        })))
+    let shard_layers: serde_json::Map<String, serde_json::Value> = shards
+        .iter()
+        .map(|s| {
+            (
+                s.index.to_string(),
+                serde_json::json!({
+                    "layer_start": s.layer_start,
+                    "layer_end": s.layer_end,
+                    "tensor_count": s.tensor_count,
+                }),
+            )
+        })
         .collect();
 
     serde_json::json!({
@@ -493,25 +526,59 @@ fn read_kv_pair(f: &mut std::fs::File) -> Result<KvPair> {
     let key = read_string(f)?;
     let value_type = read_u32(f)?;
     let raw_bytes = read_kv_value(f, value_type)?;
-    Ok(KvPair { key, value_type, raw_bytes })
+    Ok(KvPair {
+        key,
+        value_type,
+        raw_bytes,
+    })
 }
 
 fn read_kv_value(f: &mut std::fs::File, vtype: u32) -> Result<Vec<u8>> {
     match vtype {
-        0 | 7 => { let mut b = [0u8; 1]; f.read_exact(&mut b)?; Ok(b.to_vec()) } // u8, bool
-        1 => { let mut b = [0u8; 1]; f.read_exact(&mut b)?; Ok(b.to_vec()) }      // i8
-        2 => { let mut b = [0u8; 2]; f.read_exact(&mut b)?; Ok(b.to_vec()) }      // u16
-        3 => { let mut b = [0u8; 2]; f.read_exact(&mut b)?; Ok(b.to_vec()) }      // i16
-        4 => { let mut b = [0u8; 4]; f.read_exact(&mut b)?; Ok(b.to_vec()) }      // u32
-        5 => { let mut b = [0u8; 4]; f.read_exact(&mut b)?; Ok(b.to_vec()) }      // i32
-        6 => { let mut b = [0u8; 4]; f.read_exact(&mut b)?; Ok(b.to_vec()) }      // f32
-        8 => { // string
+        0 | 7 => {
+            let mut b = [0u8; 1];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // u8, bool
+        1 => {
+            let mut b = [0u8; 1];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // i8
+        2 => {
+            let mut b = [0u8; 2];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // u16
+        3 => {
+            let mut b = [0u8; 2];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // i16
+        4 => {
+            let mut b = [0u8; 4];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // u32
+        5 => {
+            let mut b = [0u8; 4];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // i32
+        6 => {
+            let mut b = [0u8; 4];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // f32
+        8 => {
+            // string
             let s = read_string(f)?;
             let mut bytes = (s.len() as u64).to_le_bytes().to_vec();
             bytes.extend_from_slice(s.as_bytes());
             Ok(bytes)
         }
-        9 => { // array
+        9 => {
+            // array
             let arr_type = read_u32(f)?;
             let arr_len = read_u64(f)?;
             let mut bytes = arr_type.to_le_bytes().to_vec();
@@ -522,9 +589,21 @@ fn read_kv_value(f: &mut std::fs::File, vtype: u32) -> Result<Vec<u8>> {
             }
             Ok(bytes)
         }
-        10 => { let mut b = [0u8; 8]; f.read_exact(&mut b)?; Ok(b.to_vec()) } // u64
-        11 => { let mut b = [0u8; 8]; f.read_exact(&mut b)?; Ok(b.to_vec()) } // i64
-        12 => { let mut b = [0u8; 8]; f.read_exact(&mut b)?; Ok(b.to_vec()) } // f64
+        10 => {
+            let mut b = [0u8; 8];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // u64
+        11 => {
+            let mut b = [0u8; 8];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // i64
+        12 => {
+            let mut b = [0u8; 8];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        } // f64
         _ => anyhow::bail!("Unknown GGUF KV type: {}", vtype),
     }
 }
@@ -545,7 +624,7 @@ fn read_tensor_info(f: &mut std::fs::File) -> Result<TensorInfo> {
         dims,
         data_type,
         data_offset,
-        data_size: 0, // computed after parsing
+        data_size: 0,   // computed after parsing
         layer_id: None, // assigned after parsing
     })
 }
@@ -596,12 +675,11 @@ fn write_string_hashed(f: &mut std::fs::File, h: &mut Sha256, s: &str) -> Result
 ///
 /// Returns a list of (layer_id, tensor_index) pairs for gating tensors.
 pub fn find_gating_tensors(gguf: &GgufFile) -> Vec<(u32, usize)> {
-    gguf.tensors.iter()
+    gguf.tensors
+        .iter()
         .enumerate()
         .filter(|(_, t)| t.name.contains("ffn_gate_inp"))
-        .filter_map(|(idx, t)| {
-            t.layer_id.map(|lid| (lid, idx))
-        })
+        .filter_map(|(idx, t)| t.layer_id.map(|lid| (lid, idx)))
         .collect()
 }
 
@@ -614,7 +692,11 @@ pub fn extract_tensor_data(
     tensor_idx: usize,
 ) -> Result<Vec<u8>> {
     if tensor_idx >= gguf.tensors.len() {
-        anyhow::bail!("Tensor index {} out of range ({})", tensor_idx, gguf.tensors.len());
+        anyhow::bail!(
+            "Tensor index {} out of range ({})",
+            tensor_idx,
+            gguf.tensors.len()
+        );
     }
 
     let tensor = &gguf.tensors[tensor_idx];
@@ -652,11 +734,18 @@ pub fn extract_all_gating_weights(source_path: &Path) -> Result<Vec<GatingWeight
         return Ok(Vec::new());
     }
 
-    let n_embd = gguf.kv_pairs.iter()
+    let n_embd = gguf
+        .kv_pairs
+        .iter()
         .find(|kv| kv.key.ends_with(".embedding_length"))
         .and_then(|kv| {
             if kv.value_type == 4 && kv.raw_bytes.len() >= 4 {
-                Some(u32::from_le_bytes([kv.raw_bytes[0], kv.raw_bytes[1], kv.raw_bytes[2], kv.raw_bytes[3]]))
+                Some(u32::from_le_bytes([
+                    kv.raw_bytes[0],
+                    kv.raw_bytes[1],
+                    kv.raw_bytes[2],
+                    kv.raw_bytes[3],
+                ]))
             } else {
                 None
             }
@@ -670,7 +759,10 @@ pub fn extract_all_gating_weights(source_path: &Path) -> Result<Vec<GatingWeight
 
         tracing::info!(
             "Found MoE gating tensor: {} (layer {}, dims {:?}, dtype {})",
-            tensor.name, layer_id, tensor.dims, tensor.data_type
+            tensor.name,
+            layer_id,
+            tensor.dims,
+            tensor.data_type
         );
 
         let raw_data = extract_tensor_data(source_path, &gguf, *tensor_idx)?;
@@ -742,7 +834,10 @@ impl GatingWeightData {
                     for (h, cell) in row.iter_mut().enumerate() {
                         let offset = (e * h_dim + h) * 2;
                         if offset + 2 <= self.raw_data.len() {
-                            let half = u16::from_le_bytes([self.raw_data[offset], self.raw_data[offset + 1]]);
+                            let half = u16::from_le_bytes([
+                                self.raw_data[offset],
+                                self.raw_data[offset + 1],
+                            ]);
                             *cell = half_to_f32(half);
                         }
                     }
@@ -751,7 +846,10 @@ impl GatingWeightData {
             _ => {
                 // Quantized formats: fall back to zero matrix (gating weights are
                 // typically stored in f32 or f16, not quantized)
-                tracing::warn!("Gating tensor dtype {} not supported for direct extraction", self.data_type);
+                tracing::warn!(
+                    "Gating tensor dtype {} not supported for direct extraction",
+                    self.data_type
+                );
             }
         }
 
@@ -843,13 +941,28 @@ mod tests {
     #[test]
     fn test_renumber_tensor_name() {
         // Layer tensor renumbering
-        assert_eq!(renumber_tensor_name("blk.16.attn_q.weight", 16), "blk.0.attn_q.weight");
-        assert_eq!(renumber_tensor_name("blk.17.ffn_gate.weight", 16), "blk.1.ffn_gate.weight");
-        assert_eq!(renumber_tensor_name("blk.31.attn_output.weight", 16), "blk.15.attn_output.weight");
+        assert_eq!(
+            renumber_tensor_name("blk.16.attn_q.weight", 16),
+            "blk.0.attn_q.weight"
+        );
+        assert_eq!(
+            renumber_tensor_name("blk.17.ffn_gate.weight", 16),
+            "blk.1.ffn_gate.weight"
+        );
+        assert_eq!(
+            renumber_tensor_name("blk.31.attn_output.weight", 16),
+            "blk.15.attn_output.weight"
+        );
         // First shard — no change
-        assert_eq!(renumber_tensor_name("blk.0.attn_q.weight", 0), "blk.0.attn_q.weight");
+        assert_eq!(
+            renumber_tensor_name("blk.0.attn_q.weight", 0),
+            "blk.0.attn_q.weight"
+        );
         // Non-layer tensors pass through
-        assert_eq!(renumber_tensor_name("token_embd.weight", 16), "token_embd.weight");
+        assert_eq!(
+            renumber_tensor_name("token_embd.weight", 16),
+            "token_embd.weight"
+        );
         assert_eq!(renumber_tensor_name("output.weight", 16), "output.weight");
     }
 
@@ -861,9 +974,33 @@ mod tests {
             kv_count: 0,
             kv_pairs: vec![],
             tensors: vec![
-                TensorInfo { name: "blk.0.attn_q.weight".into(), n_dims: 2, dims: vec![4096, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
-                TensorInfo { name: "blk.0.ffn_gate_inp.weight".into(), n_dims: 2, dims: vec![8, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
-                TensorInfo { name: "blk.1.ffn_gate_inp.weight".into(), n_dims: 2, dims: vec![8, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(1) },
+                TensorInfo {
+                    name: "blk.0.attn_q.weight".into(),
+                    n_dims: 2,
+                    dims: vec![4096, 4096],
+                    data_type: 0,
+                    data_offset: 0,
+                    data_size: 0,
+                    layer_id: Some(0),
+                },
+                TensorInfo {
+                    name: "blk.0.ffn_gate_inp.weight".into(),
+                    n_dims: 2,
+                    dims: vec![8, 4096],
+                    data_type: 0,
+                    data_offset: 0,
+                    data_size: 0,
+                    layer_id: Some(0),
+                },
+                TensorInfo {
+                    name: "blk.1.ffn_gate_inp.weight".into(),
+                    n_dims: 2,
+                    dims: vec![8, 4096],
+                    data_type: 0,
+                    data_offset: 0,
+                    data_size: 0,
+                    layer_id: Some(1),
+                },
             ],
             data_offset: 0,
             alignment: 32,
@@ -893,7 +1030,8 @@ mod tests {
     #[test]
     fn test_gating_weight_data_to_f32() {
         // 2 experts × 2 hidden_dim, f32
-        let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0].iter()
+        let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
 
@@ -914,16 +1052,33 @@ mod tests {
     #[test]
     fn test_rewrite_kv_pairs() {
         let kvs = vec![
-            KvPair { key: "general.name".into(), value_type: 8, raw_bytes: vec![3, 0, 0, 0, 0, 0, 0, 0, b'f', b'o', b'o'] },
-            KvPair { key: "llama.block_count".into(), value_type: 4, raw_bytes: 32u32.to_le_bytes().to_vec() },
-            KvPair { key: "llama.attention.head_count".into(), value_type: 4, raw_bytes: 32u32.to_le_bytes().to_vec() },
+            KvPair {
+                key: "general.name".into(),
+                value_type: 8,
+                raw_bytes: vec![3, 0, 0, 0, 0, 0, 0, 0, b'f', b'o', b'o'],
+            },
+            KvPair {
+                key: "llama.block_count".into(),
+                value_type: 4,
+                raw_bytes: 32u32.to_le_bytes().to_vec(),
+            },
+            KvPair {
+                key: "llama.attention.head_count".into(),
+                value_type: 4,
+                raw_bytes: 32u32.to_le_bytes().to_vec(),
+            },
         ];
 
         let rewritten = rewrite_kv_pairs(&kvs, 16);
         assert_eq!(rewritten.len(), 3);
         // block_count should be rewritten to 16
         assert_eq!(
-            u32::from_le_bytes([rewritten[1].raw_bytes[0], rewritten[1].raw_bytes[1], rewritten[1].raw_bytes[2], rewritten[1].raw_bytes[3]]),
+            u32::from_le_bytes([
+                rewritten[1].raw_bytes[0],
+                rewritten[1].raw_bytes[1],
+                rewritten[1].raw_bytes[2],
+                rewritten[1].raw_bytes[3]
+            ]),
             16
         );
         // Other KVs unchanged
@@ -938,18 +1093,18 @@ mod tests {
     #[test]
     fn test_ggml_type_size_all_known_types() {
         // Verify all explicitly handled quantization types
-        assert_eq!(ggml_type_size(2), 0.5625);  // Q4_0
-        assert_eq!(ggml_type_size(3), 0.625);   // Q4_1
-        assert_eq!(ggml_type_size(6), 0.5625);  // Q5_0
-        assert_eq!(ggml_type_size(7), 0.625);   // Q5_1
-        assert_eq!(ggml_type_size(8), 1.0);     // Q8_0
-        assert_eq!(ggml_type_size(9), 1.0);     // Q8_1
+        assert_eq!(ggml_type_size(2), 0.5625); // Q4_0
+        assert_eq!(ggml_type_size(3), 0.625); // Q4_1
+        assert_eq!(ggml_type_size(6), 0.5625); // Q5_0
+        assert_eq!(ggml_type_size(7), 0.625); // Q5_1
+        assert_eq!(ggml_type_size(8), 1.0); // Q8_0
+        assert_eq!(ggml_type_size(9), 1.0); // Q8_1
         assert_eq!(ggml_type_size(10), 0.5625); // Q2_K
-        assert_eq!(ggml_type_size(11), 0.625);  // Q3_K
+        assert_eq!(ggml_type_size(11), 0.625); // Q3_K
         assert_eq!(ggml_type_size(12), 0.5625); // Q4_K
         assert_eq!(ggml_type_size(13), 0.6875); // Q5_K
         assert_eq!(ggml_type_size(14), 0.8125); // Q6_K
-        assert_eq!(ggml_type_size(28), 2.0);    // BF16
+        assert_eq!(ggml_type_size(28), 2.0); // BF16
     }
 
     #[test]
@@ -1035,7 +1190,10 @@ mod tests {
     #[test]
     fn test_renumber_tensor_name_saturating_sub() {
         // layer_start > layer_id should saturate to 0 (defensive)
-        assert_eq!(renumber_tensor_name("blk.5.attn_q.weight", 10), "blk.0.attn_q.weight");
+        assert_eq!(
+            renumber_tensor_name("blk.5.attn_q.weight", 10),
+            "blk.0.attn_q.weight"
+        );
     }
 
     #[test]
@@ -1169,8 +1327,24 @@ mod tests {
             kv_count: 0,
             kv_pairs: vec![],
             tensors: vec![
-                TensorInfo { name: "blk.0.attn_q.weight".into(), n_dims: 2, dims: vec![4096, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
-                TensorInfo { name: "blk.0.ffn_gate.weight".into(), n_dims: 2, dims: vec![4096, 4096], data_type: 0, data_offset: 0, data_size: 0, layer_id: Some(0) },
+                TensorInfo {
+                    name: "blk.0.attn_q.weight".into(),
+                    n_dims: 2,
+                    dims: vec![4096, 4096],
+                    data_type: 0,
+                    data_offset: 0,
+                    data_size: 0,
+                    layer_id: Some(0),
+                },
+                TensorInfo {
+                    name: "blk.0.ffn_gate.weight".into(),
+                    n_dims: 2,
+                    dims: vec![4096, 4096],
+                    data_type: 0,
+                    data_offset: 0,
+                    data_size: 0,
+                    layer_id: Some(0),
+                },
             ],
             data_offset: 0,
             alignment: 32,
@@ -1183,9 +1357,11 @@ mod tests {
 
     #[test]
     fn test_rewrite_kv_pairs_no_block_count() {
-        let kvs = vec![
-            KvPair { key: "general.name".into(), value_type: 8, raw_bytes: vec![1, 0, 0, 0, 0, 0, 0, 0, b'x'] },
-        ];
+        let kvs = vec![KvPair {
+            key: "general.name".into(),
+            value_type: 8,
+            raw_bytes: vec![1, 0, 0, 0, 0, 0, 0, 0, b'x'],
+        }];
 
         let rewritten = rewrite_kv_pairs(&kvs, 8);
         assert_eq!(rewritten.len(), 1);
@@ -1195,9 +1371,11 @@ mod tests {
     #[test]
     fn test_rewrite_kv_pairs_wrong_type_block_count() {
         // block_count with wrong type (string instead of uint32) should NOT be rewritten
-        let kvs = vec![
-            KvPair { key: "llama.block_count".into(), value_type: 8, raw_bytes: vec![2, 0, 0, 0, 0, 0, 0, 0, b'3', b'2'] },
-        ];
+        let kvs = vec![KvPair {
+            key: "llama.block_count".into(),
+            value_type: 8,
+            raw_bytes: vec![2, 0, 0, 0, 0, 0, 0, 0, b'3', b'2'],
+        }];
 
         let rewritten = rewrite_kv_pairs(&kvs, 8);
         // Should be unchanged since type is 8 (string), not 4 (uint32)

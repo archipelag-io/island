@@ -179,9 +179,9 @@ impl ContainerConfig {
                 self.memory_bytes = Some(8 * 1024 * 1024 * 1024); // 8GB
                 self.timeout_seconds = 600;
                 self.network_disabled = false; // Network allowed
-                // GPU access if specified
+                                               // GPU access if specified
                 self.cpu_quota = Some(400_000); // 4 CPUs
-                // Use GPU profile if GPU devices are configured, otherwise Network
+                                                // Use GPU profile if GPU devices are configured, otherwise Network
                 if self.gpu_devices.is_some() {
                     ProfileType::Gpu
                 } else {
@@ -340,9 +340,10 @@ pub async fn run_container_streaming(
     });
 
     // Build seccomp security option if a profile is provided
-    let security_opt = config.seccomp_profile.as_ref().map(|profile_json| {
-        vec![format!("seccomp={}", profile_json)]
-    });
+    let security_opt = config
+        .seccomp_profile
+        .as_ref()
+        .map(|profile_json| vec![format!("seccomp={}", profile_json)]);
 
     // Create container with resource limits
     let host_config = HostConfig {
@@ -697,10 +698,8 @@ mod tests {
 
     #[test]
     fn build_image_reference_with_sha256_prefixed_digest() {
-        let result = build_image_reference(
-            "myregistry/myimage:latest",
-            Some("sha256:abcdef1234567890"),
-        );
+        let result =
+            build_image_reference("myregistry/myimage:latest", Some("sha256:abcdef1234567890"));
         assert_eq!(result, "myregistry/myimage@sha256:abcdef1234567890");
     }
 
@@ -793,8 +792,14 @@ mod tests {
     fn container_config_defaults_are_security_sane() {
         let config = ContainerConfig::default();
 
-        assert!(config.network_disabled, "network should be disabled by default");
-        assert!(config.read_only_rootfs, "rootfs should be read-only by default");
+        assert!(
+            config.network_disabled,
+            "network should be disabled by default"
+        );
+        assert!(
+            config.read_only_rootfs,
+            "rootfs should be read-only by default"
+        );
         assert_eq!(config.timeout_seconds, 300);
         assert_eq!(config.memory_bytes, Some(8 * 1024 * 1024 * 1024)); // 8GB
         assert!(config.gpu_devices.is_none(), "no GPU by default");

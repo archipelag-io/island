@@ -30,7 +30,11 @@ pub enum LayerOutput {
     /// Token string output (from full model inference)
     Token { text: String, seq: u64 },
     /// Raw embedding/activation vector (f32 values serialized as bytes)
-    Activation { data: Vec<u8>, seq: u64, n_embd: u32 },
+    Activation {
+        data: Vec<u8>,
+        seq: u64,
+        n_embd: u32,
+    },
     /// Final output marker
     Done { total_tokens: u64 },
 }
@@ -114,10 +118,13 @@ impl LayerExecutor for FullModelExecutor {
                 break;
             }
             seq += 1;
-            if output_tx.send(LayerOutput::Token {
-                text: token_str.to_string(),
-                seq,
-            }).is_err() {
+            if output_tx
+                .send(LayerOutput::Token {
+                    text: token_str.to_string(),
+                    seq,
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -171,10 +178,7 @@ impl LayerExecutor for EmbeddingExecutor {
             // Enable embedding mode
             model_params.n_gpu_layers = 99; // offload all layers to GPU if available
 
-            let model = llama_cpp_sys::llama_load_model_from_file(
-                c_path.as_ptr(),
-                model_params,
-            );
+            let model = llama_cpp_sys::llama_load_model_from_file(c_path.as_ptr(), model_params);
             if model.is_null() {
                 anyhow::bail!("Failed to load model: {}", self.model_path);
             }
@@ -191,8 +195,8 @@ impl LayerExecutor for EmbeddingExecutor {
             }
 
             // Tokenize input
-            let c_prompt = CString::new(prompt)
-                .map_err(|e| anyhow::anyhow!("Invalid prompt: {}", e))?;
+            let c_prompt =
+                CString::new(prompt).map_err(|e| anyhow::anyhow!("Invalid prompt: {}", e))?;
 
             let max_tokens = self.context_size as i32;
             let mut tokens = vec![0i32; max_tokens as usize];
@@ -209,7 +213,11 @@ impl LayerExecutor for EmbeddingExecutor {
             if n_tokens < 0 {
                 llama_cpp_sys::llama_free(ctx);
                 llama_cpp_sys::llama_free_model(model);
-                anyhow::bail!("Tokenization failed (needed {} tokens, buffer is {})", -n_tokens, max_tokens);
+                anyhow::bail!(
+                    "Tokenization failed (needed {} tokens, buffer is {})",
+                    -n_tokens,
+                    max_tokens
+                );
             }
 
             tokens.truncate(n_tokens as usize);
@@ -247,9 +255,7 @@ impl LayerExecutor for EmbeddingExecutor {
 
             // Copy embedding data to a Vec<u8>
             let embd_slice = std::slice::from_raw_parts(embd_ptr, n_embd);
-            let embd_bytes: Vec<u8> = embd_slice.iter()
-                .flat_map(|&f| f.to_le_bytes())
-                .collect();
+            let embd_bytes: Vec<u8> = embd_slice.iter().flat_map(|&f| f.to_le_bytes()).collect();
 
             // Send the activation
             let _ = output_tx.send(LayerOutput::Activation {
@@ -257,7 +263,9 @@ impl LayerExecutor for EmbeddingExecutor {
                 seq: 1,
                 n_embd: n_embd as u32,
             });
-            let _ = output_tx.send(LayerOutput::Done { total_tokens: n_tokens as u64 });
+            let _ = output_tx.send(LayerOutput::Done {
+                total_tokens: n_tokens as u64,
+            });
 
             // Cleanup
             llama_cpp_sys::llama_free(ctx);
@@ -284,7 +292,10 @@ mod tests {
 
     #[test]
     fn test_layer_output_serialization() {
-        let token = LayerOutput::Token { text: "hello".into(), seq: 1 };
+        let token = LayerOutput::Token {
+            text: "hello".into(),
+            seq: 1,
+        };
         let json = serde_json::to_string(&token).unwrap();
         assert!(json.contains("\"type\":\"Token\""));
 
@@ -304,7 +315,10 @@ mod tests {
 
     #[test]
     fn test_layer_output_token_roundtrip() {
-        let original = LayerOutput::Token { text: "world".into(), seq: 99 };
+        let original = LayerOutput::Token {
+            text: "world".into(),
+            seq: 99,
+        };
         let json = serde_json::to_string(&original).unwrap();
         let restored: LayerOutput = serde_json::from_str(&json).unwrap();
         match restored {
@@ -358,7 +372,10 @@ mod tests {
 
     #[test]
     fn test_layer_output_token_empty_text() {
-        let token = LayerOutput::Token { text: String::new(), seq: 0 };
+        let token = LayerOutput::Token {
+            text: String::new(),
+            seq: 0,
+        };
         let json = serde_json::to_string(&token).unwrap();
         let restored: LayerOutput = serde_json::from_str(&json).unwrap();
         match restored {
@@ -372,7 +389,10 @@ mod tests {
 
     #[test]
     fn test_layer_output_token_unicode_text() {
-        let token = LayerOutput::Token { text: "Hello 🌍 世界".into(), seq: 5 };
+        let token = LayerOutput::Token {
+            text: "Hello 🌍 世界".into(),
+            seq: 5,
+        };
         let json = serde_json::to_string(&token).unwrap();
         let restored: LayerOutput = serde_json::from_str(&json).unwrap();
         match restored {
@@ -401,7 +421,9 @@ mod tests {
 
     #[test]
     fn test_layer_output_done_large_token_count() {
-        let done = LayerOutput::Done { total_tokens: u64::MAX };
+        let done = LayerOutput::Done {
+            total_tokens: u64::MAX,
+        };
         let json = serde_json::to_string(&done).unwrap();
         let restored: LayerOutput = serde_json::from_str(&json).unwrap();
         match restored {
@@ -427,8 +449,16 @@ mod tests {
         let cloned = original.clone();
         match (&original, &cloned) {
             (
-                LayerOutput::Activation { data: d1, seq: s1, n_embd: n1 },
-                LayerOutput::Activation { data: d2, seq: s2, n_embd: n2 },
+                LayerOutput::Activation {
+                    data: d1,
+                    seq: s1,
+                    n_embd: n1,
+                },
+                LayerOutput::Activation {
+                    data: d2,
+                    seq: s2,
+                    n_embd: n2,
+                },
             ) => {
                 assert_eq!(d1, d2);
                 assert_eq!(s1, s2);

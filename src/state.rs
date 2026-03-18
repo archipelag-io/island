@@ -74,7 +74,11 @@ impl StateManager {
 
         debug!("State loaded: paired={}", state.paired);
 
-        Ok(Self { state_dir, state, model_cache: None })
+        Ok(Self {
+            state_dir,
+            state,
+            model_cache: None,
+        })
     }
 
     /// Check if this Island is already paired

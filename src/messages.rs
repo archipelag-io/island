@@ -189,7 +189,8 @@ mod tests {
 
     #[test]
     fn test_workload_output_image_deserialization() {
-        let json = r#"{"type":"image","data":"base64data","format":"png","width":512,"height":512}"#;
+        let json =
+            r#"{"type":"image","data":"base64data","format":"png","width":512,"height":512}"#;
         let output: WorkloadOutput = serde_json::from_str(json).unwrap();
         match output {
             WorkloadOutput::Image {

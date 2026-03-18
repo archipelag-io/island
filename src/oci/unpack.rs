@@ -19,13 +19,17 @@ pub fn unpack_image(cache_dir: &Path, image: &str, rootfs_dir: &Path) -> Result<
 
     // Read manifest to get layer order
     let manifest_path = image_cache.join("manifest.json");
-    let manifest_data = fs::read_to_string(&manifest_path)
-        .context("Manifest not found — pull the image first")?;
+    let manifest_data =
+        fs::read_to_string(&manifest_path).context("Manifest not found — pull the image first")?;
 
     let manifest: oci_distribution::manifest::OciImageManifest =
         serde_json::from_str(&manifest_data).context("Invalid manifest")?;
 
-    info!("Unpacking {} layers into {}", manifest.layers.len(), rootfs_dir.display());
+    info!(
+        "Unpacking {} layers into {}",
+        manifest.layers.len(),
+        rootfs_dir.display()
+    );
 
     for (i, layer) in manifest.layers.iter().enumerate() {
         let layer_filename = format!("{}.tar.gz", layer.digest.replace(':', "_"));
@@ -112,10 +116,7 @@ fn unpack_layer(layer_path: &Path, rootfs_dir: &Path) -> Result<()> {
 /// .wh..wh..opq → delete all children of the directory (opaque whiteout)
 fn handle_whiteout(path_str: &str, rootfs_dir: &Path) {
     let path = std::path::Path::new(path_str);
-    let filename = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let filename = path.file_name().unwrap_or_default().to_string_lossy();
 
     if filename == ".wh..wh..opq" {
         // Opaque whiteout — clear the directory
