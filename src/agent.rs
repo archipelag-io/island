@@ -292,8 +292,22 @@ impl Agent {
                         }
                     }
 
+                    // Build asking prices map from config
+                    let asking_prices = {
+                        let pricing = &self.config.pricing;
+                        if pricing.default_price.is_none() && pricing.workloads.is_empty() {
+                            None
+                        } else {
+                            let mut prices = pricing.workloads.clone();
+                            if let Some(ref default_price) = pricing.default_price {
+                                prices.insert("_default".to_string(), default_price.clone());
+                            }
+                            Some(prices)
+                        }
+                    };
+
                     if let Err(e) = self.nats.send_enhanced_heartbeat(
-                        active, system_snapshot, gpu_metrics, None, cache_snapshot, Some(perf_estimates)
+                        active, system_snapshot, gpu_metrics, None, cache_snapshot, Some(perf_estimates), asking_prices
                     ).await {
                         warn!("Failed to send heartbeat: {}", e);
                         consecutive_failures += 1;

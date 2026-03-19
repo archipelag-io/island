@@ -9,6 +9,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 // Re-define the types here since they're in a binary crate.
 // These must stay in sync with src/nats.rs.
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub struct EnhancedHeartbeat {
@@ -25,6 +26,8 @@ pub struct EnhancedHeartbeat {
     pub active_job_metrics: Option<Vec<ActiveJobMetrics>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheMetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_prices: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +81,7 @@ fn make_minimal_heartbeat() -> EnhancedHeartbeat {
         gpus: None,
         active_job_metrics: None,
         cache: None,
+        asking_prices: None,
     }
 }
 
@@ -149,6 +153,11 @@ fn make_full_heartbeat() -> EnhancedHeartbeat {
                 "wk-embeddings".to_string(),
             ],
         }),
+        asking_prices: Some(HashMap::from([
+            ("_default".to_string(), "1.0".to_string()),
+            ("llm-chat".to_string(), "2.0".to_string()),
+            ("image-gen".to_string(), "5.0".to_string()),
+        ])),
     }
 }
 

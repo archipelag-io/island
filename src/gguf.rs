@@ -1,11 +1,15 @@
 //! Native GGUF runtime for executing llama.cpp workloads
 //!
-//! Downloads GGUF model files, loads them with llama_cpp, and streams
+//! Downloads GGUF model files, loads them with llama-cpp-2, and streams
 //! token-by-token output back through NATS.
 
 use anyhow::{Context, Result};
-use llama_cpp::standard_sampler::{SamplerStage, StandardSampler};
-use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::sampling::LlamaSampler;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tracing::info;
@@ -65,68 +69,102 @@ pub async fn execute_gguf_job(
     let prompt = extract_prompt(&job.input)?;
 
     // Load model and generate in spawn_blocking, stream tokens via channel
-    let model_path_str = model_path.to_string_lossy().to_string();
+    let model_path_clone = model_path.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
 
     let cancel = cancel_rx.clone();
     let generate_handle = tokio::task::spawn_blocking(move || {
+        // Initialize backend
+        let backend = LlamaBackend::init()
+            .map_err(|e| anyhow::anyhow!("Failed to init llama backend: {:?}", e))?;
+
         // Load model
-        let params = LlamaParams::default();
-        let model = LlamaModel::load_from_file(&model_path_str, params)
+        let model_params = LlamaModelParams::default();
+        let model = LlamaModel::load_from_file(&backend, &model_path_clone, &model_params)
             .map_err(|e| anyhow::anyhow!("Failed to load GGUF model: {:?}", e))?;
 
-        // Create session with context size
-        let mut session_params = SessionParams::default();
-        session_params.n_ctx = context_size;
+        // Create context
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(std::num::NonZeroU32::new(context_size));
+        let mut ctx = model
+            .new_context(&backend, ctx_params)
+            .map_err(|e| anyhow::anyhow!("Failed to create llama context: {:?}", e))?;
 
-        let mut session = model
-            .create_session(session_params)
-            .map_err(|e| anyhow::anyhow!("Failed to create llama session: {:?}", e))?;
+        // Tokenize prompt
+        let tokens = model
+            .str_to_token(&prompt, AddBos::Always)
+            .map_err(|e| anyhow::anyhow!("Failed to tokenize prompt: {:?}", e))?;
 
-        // Feed prompt
-        session
-            .advance_context(&prompt)
-            .map_err(|e| anyhow::anyhow!("Failed to feed prompt: {:?}", e))?;
+        // Process prompt in batches
+        let n_ctx = ctx.n_ctx() as usize;
+        let tokens = if tokens.len() > n_ctx.saturating_sub(4) {
+            tokens[..n_ctx.saturating_sub(4)].to_vec()
+        } else {
+            tokens
+        };
 
-        // Configure sampler with temperature
-        let sampler = StandardSampler::new_softmax(
-            vec![
-                SamplerStage::RepetitionPenalty {
-                    repetition_penalty: 1.1,
-                    frequency_penalty: 0.0,
-                    presence_penalty: 0.0,
-                    last_n: 64,
-                },
-                SamplerStage::TopP(0.9),
-                SamplerStage::Temperature(temperature),
-            ],
-            1, // min_keep
-        );
+        let mut batch = LlamaBatch::new(512, 1);
+        for (i, &token) in tokens.iter().enumerate() {
+            let is_last = i == tokens.len() - 1;
+            batch.add(token, i as i32, &[0], is_last)
+                .map_err(|e| anyhow::anyhow!("Failed to add token to batch: {:?}", e))?;
+        }
+
+        ctx.decode(&mut batch)
+            .map_err(|e| anyhow::anyhow!("Failed to decode prompt: {:?}", e))?;
+
+        // Set up sampler chain
+        let sampler = LlamaSampler::chain_simple([
+            LlamaSampler::top_p(0.9, 1),
+            LlamaSampler::temp(temperature),
+            LlamaSampler::dist(42),
+        ]);
+        let mut sampler = sampler;
 
         // Generate tokens
-        let completions = session
-            .start_completing_with(sampler, max_tokens)
-            .map_err(|e| anyhow::anyhow!("Failed to start completion: {:?}", e))?;
+        let mut n_cur = tokens.len();
         let mut token_count: u64 = 0;
-        let mut output = String::new();
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let eos = model.token_eos();
 
-        for token_str in completions.into_strings() {
-            let token_str = token_str.to_string();
+        for _ in 0..max_tokens {
             // Check cancellation
             if *cancel.borrow() {
                 break;
             }
 
-            output.push_str(&token_str);
-            token_count += 1;
+            // Sample next token
+            let new_token = sampler.sample(&ctx, -1);
+            sampler.accept(new_token);
 
-            // Send token to async side; if receiver dropped, stop
-            if tx.blocking_send(token_str).is_err() {
+            // Check for end of generation
+            if new_token == eos {
                 break;
             }
+
+            // Convert token to string piece
+            let piece = model
+                .token_to_piece(new_token, &mut decoder, true, None)
+                .unwrap_or_default();
+
+            if !piece.is_empty() {
+                token_count += 1;
+                if tx.blocking_send(piece).is_err() {
+                    break;
+                }
+            }
+
+            // Prepare next batch
+            batch.clear();
+            batch.add(new_token, n_cur as i32, &[0], true)
+                .map_err(|e| anyhow::anyhow!("Failed to add token to batch: {:?}", e))?;
+            n_cur += 1;
+
+            ctx.decode(&mut batch)
+                .map_err(|e| anyhow::anyhow!("Failed to decode token: {:?}", e))?;
         }
 
-        Ok::<(String, u64), anyhow::Error>((output, token_count))
+        Ok::<u64, anyhow::Error>(token_count)
     });
 
     // Stream tokens as they arrive
@@ -140,7 +178,7 @@ pub async fn execute_gguf_job(
     let result = generate_handle.await?;
 
     match result {
-        Ok((_output, token_count)) => {
+        Ok(token_count) => {
             let final_event = serde_json::json!({
                 "type": "done",
                 "usage": { "completion_tokens": token_count }
@@ -174,19 +212,21 @@ pub fn extract_prompt(input: &serde_json::Value) -> Result<String> {
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
             match role {
                 "system" => {
-                    prompt.push_str(&format!("[INST] <<SYS>>\n{}\n<</SYS>>\n\n", content));
+                    prompt.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", content));
                 }
                 "user" => {
-                    prompt.push_str(&format!("[INST] {} [/INST]", content));
+                    prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", content));
                 }
                 "assistant" => {
-                    prompt.push_str(&format!("{} </s>", content));
+                    prompt.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", content));
                 }
                 _ => {
-                    prompt.push_str(&format!("[INST] {} [/INST]", content));
+                    prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, content));
                 }
             }
         }
+        // Add assistant opening
+        prompt.push_str("<|im_start|>assistant\n");
         return Ok(prompt);
     }
 

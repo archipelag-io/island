@@ -7,6 +7,7 @@ use async_nats::jetstream;
 use async_nats::{Client, ConnectOptions, Message, Subscriber};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -95,6 +96,10 @@ pub struct EnhancedHeartbeat {
     /// Performance estimates for workload fit scoring
     #[serde(skip_serializing_if = "Option::is_none")]
     pub performance_estimates: Option<PerformanceEstimates>,
+    /// Asking prices for workloads (slug -> price in credits).
+    /// Includes per-workload overrides and the default price (keyed as "_default").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_prices: Option<HashMap<String, String>>,
 }
 
 /// Performance estimates computed from hardware specs.
@@ -558,6 +563,7 @@ impl NatsAgent {
         active_job_metrics: Option<Vec<ActiveJobMetrics>>,
         cache: Option<CacheMetricsSnapshot>,
         performance_estimates: Option<PerformanceEstimates>,
+        asking_prices: Option<HashMap<String, String>>,
     ) -> Result<()> {
         let msg = EnhancedHeartbeat {
             host_id: self.host_id.clone(),
@@ -570,6 +576,7 @@ impl NatsAgent {
             active_job_metrics,
             cache,
             performance_estimates,
+            asking_prices,
         };
 
         let payload = serde_json::to_vec(&msg).context("Failed to serialize enhanced heartbeat")?;
@@ -1300,6 +1307,7 @@ mod tests {
             active_job_metrics: None,
             cache: None,
             performance_estimates: None,
+            asking_prices: None,
         };
         let json_str = serde_json::to_string(&msg).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1357,6 +1365,10 @@ mod tests {
                 nats_rtt_ms: Some(12.5),
                 public_addr: Some("1.2.3.4:5678".to_string()),
             }),
+            asking_prices: Some(HashMap::from([
+                ("llm-chat".to_string(), "2.0".to_string()),
+                ("_default".to_string(), "1.0".to_string()),
+            ])),
         };
         let json_str = serde_json::to_string(&msg).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1365,6 +1377,8 @@ mod tests {
         assert_eq!(v["active_job_metrics"][0]["tokens_generated"], 150);
         assert_eq!(v["cache"]["warm_workload_count"], 2);
         assert_eq!(v["performance_estimates"]["nats_rtt_ms"], 12.5);
+        assert_eq!(v["asking_prices"]["llm-chat"], "2.0");
+        assert_eq!(v["asking_prices"]["_default"], "1.0");
     }
 
     #[test]

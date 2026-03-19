@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use config::{Config, File};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 pub use crate::cache::CacheConfig;
 pub use crate::security::SigningConfig;
@@ -48,6 +49,10 @@ pub struct AgentConfig {
     /// Model preloading settings
     #[serde(default)]
     pub preload: PreloadConfig,
+
+    /// Asking price configuration for market pricing
+    #[serde(default)]
+    pub pricing: PricingConfig,
 }
 
 /// Model preloading configuration
@@ -75,6 +80,30 @@ impl Default for PreloadConfig {
             models: Vec::new(),
         }
     }
+}
+
+/// Asking price configuration for the compute market
+///
+/// Allows Island operators to set per-workload asking prices (credits per job).
+/// These are included in heartbeat messages sent to the coordinator.
+///
+/// Example config.toml:
+/// ```toml
+/// [pricing]
+/// default_price = "1.0"
+/// [pricing.workloads]
+/// "llm-chat" = "2.0"
+/// "image-gen" = "5.0"
+/// ```
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PricingConfig {
+    /// Default asking price for all workloads (credits per job)
+    #[serde(default)]
+    pub default_price: Option<String>,
+
+    /// Per-workload asking price overrides (slug -> price)
+    #[serde(default)]
+    pub workloads: HashMap<String, String>,
 }
 
 /// Model cache configuration for downloaded ML models
@@ -272,6 +301,7 @@ impl Default for AgentConfig {
             registry: RegistryConfig::default(),
             model_cache: ModelCacheConfig::default(),
             preload: PreloadConfig::default(),
+            pricing: PricingConfig::default(),
         }
     }
 }
@@ -332,5 +362,19 @@ mod tests {
         let host = HostConfig::default();
         assert!(host.region.is_none());
         assert!(host.name.is_none());
+    }
+
+    #[test]
+    fn test_pricing_config_defaults() {
+        let pricing = PricingConfig::default();
+        assert!(pricing.default_price.is_none());
+        assert!(pricing.workloads.is_empty());
+    }
+
+    #[test]
+    fn test_default_config_has_empty_pricing() {
+        let config = AgentConfig::default();
+        assert!(config.pricing.default_price.is_none());
+        assert!(config.pricing.workloads.is_empty());
     }
 }

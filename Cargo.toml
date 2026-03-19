@@ -12,9 +12,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-pipeline = ["dep:quinn", "dep:rcgen", "dep:llama_cpp_sys", "dep:base64", "dep:hostname"]
+pipeline = ["dep:quinn", "dep:rcgen", "dep:llama-cpp-sys-2", "dep:base64", "dep:hostname"]
 onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:image", "dep:base64"]
-gguf = ["dep:llama_cpp"]
+gguf = ["dep:llama-cpp-2", "dep:encoding_rs"]
 diffusers = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers", "dep:image", "dep:base64", "dep:hf-hub"]
 all-runtimes = ["onnx", "gguf", "diffusers", "pipeline"]
 
@@ -94,8 +94,9 @@ ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.16", optional = true }
 
 # GGUF/llama.cpp (optional, feature-gated)
-llama_cpp = { version = "0.3.2", optional = true }
-llama_cpp_sys = { version = "0.3.2", optional = true }
+llama-cpp-2 = { version = "0.1.139", optional = true, default-features = false }
+llama-cpp-sys-2 = { version = "0.1.139", optional = true, default-features = false }
+encoding_rs = { version = "0.8", optional = true }
 
 # Diffusers via Candle (optional, feature-gated)
 candle-core = { version = "0.9.2", optional = true }

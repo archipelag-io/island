@@ -171,6 +171,7 @@ dependencies = [
  "dashmap",
  "dirs 6.0.0",
  "ed25519-dalek",
+ "encoding_rs",
  "filetime",
  "flate2",
  "futures-util",
@@ -178,8 +179,8 @@ dependencies = [
  "hf-hub",
  "hostname",
  "image",
- "llama_cpp",
- "llama_cpp_sys",
+ "llama-cpp-2",
+ "llama-cpp-sys-2",
  "ndarray 0.16.1",
  "num_cpus",
  "oci-distribution",
@@ -412,25 +413,22 @@ checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
 
 [[package]]
 name = "bindgen"
-version = "0.69.5"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
  "itertools 0.12.1",
- "lazy_static",
- "lazycell",
  "log",
  "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash 1.1.0",
+ "rustc-hash",
  "shlex",
  "syn",
- "which",
 ]
 
 [[package]]
@@ -722,9 +720,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.51"
+version = "1.2.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a0aeaff4ff1a90589618835a598e545176939b97874f7abc7851caa0618f203"
+checksum = "7a0dd1ca384932ff3641c8718a02769f1698e7563dc6974ffd03346116310423"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -898,7 +896,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68578f196d2a33ff61b27fae256c3164f65e36382648e30666dde05b8cc9dfdf"
 dependencies = [
  "async-trait",
- "convert_case 0.6.0",
+ "convert_case",
  "json5",
  "nom 7.1.3",
  "pathdiff",
@@ -948,12 +946,6 @@ dependencies = [
  "once_cell",
  "tiny-keccak",
 ]
-
-[[package]]
-name = "convert_case"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
 name = "convert_case"
@@ -1054,7 +1046,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "log",
  "regalloc2",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "serde",
  "smallvec",
  "target-lexicon",
@@ -1354,19 +1346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_more"
-version = "0.99.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6edb4b64a43d977b8e99788fe3a04d483834fba1215a7e02caa415b626497f7f"
-dependencies = [
- "convert_case 0.4.0",
- "proc-macro2",
- "quote",
- "rustc_version",
- "syn",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1559,6 +1538,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1709,9 +1708,18 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.6"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "645cbb3a84e60b7531617d5ae4e57f7e27308f6445f5abf653209ea76dec8dff"
+checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "find_cuda_helper"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f9e65c593dd01ac77daad909ea4ad17f0d6d1776193fc8ea766356177abdad"
+dependencies = [
+ "glob",
+]
 
 [[package]]
 name = "flate2"
@@ -2238,15 +2246,6 @@ name = "hmac-sha256"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
-
-[[package]]
-name = "home"
-version = "0.5.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
-dependencies = [
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "hostname"
@@ -2836,12 +2835,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "lazycell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
-
-[[package]]
 name = "leb128"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2903,15 +2896,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "link-cplusplus"
-version = "1.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f78c730aaa7d0b9336a299029ea49f9ee53b0ed06e9202e8cb7db9bae7b8c82"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2930,30 +2914,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
-name = "llama_cpp"
-version = "0.3.2"
+name = "llama-cpp-2"
+version = "0.1.139"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f126770a2ed5e0e4596119479dc56f56b99037246bf0e36c544f7581a9458fd"
+checksum = "d1b92f824729095247507a51f5ef7100adc70bbb4f86f1c4fdccbe4afd356bb9"
 dependencies = [
- "derive_more",
- "futures",
- "llama_cpp_sys",
- "num_cpus",
- "thiserror 1.0.69",
- "tokio",
+ "encoding_rs",
+ "enumflags2",
+ "llama-cpp-sys-2",
+ "thiserror 2.0.17",
  "tracing",
+ "tracing-core",
 ]
 
 [[package]]
-name = "llama_cpp_sys"
-version = "0.3.2"
+name = "llama-cpp-sys-2"
+version = "0.1.139"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "037a1881ada3592c6a922224d5177b4b4f452e6b2979eb97393b71989e48357f"
+checksum = "e762baca42996077c9b3e5af393d585ca5299977faacf8ac4391f2dbd013a5d5"
 dependencies = [
  "bindgen",
  "cc",
- "link-cplusplus",
- "once_cell",
+ "cmake",
+ "find_cuda_helper",
+ "glob",
+ "walkdir",
 ]
 
 [[package]]
@@ -3933,7 +3918,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "rustls",
  "socket2",
  "thiserror 2.0.17",
@@ -3955,7 +3940,7 @@ dependencies = [
  "lru-slab",
  "rand 0.9.2",
  "ring",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -4247,7 +4232,7 @@ checksum = "12908dbeb234370af84d0579b9f68258a0f67e201412dd9a2814e6f45b2fc0f0"
 dependencies = [
  "hashbrown 0.14.5",
  "log",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "slice-group-by",
  "smallvec",
 ]
@@ -4418,12 +4403,6 @@ name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f7d92ca342cea22a06f2121d944b4fd82af56988c270852495420f961d4ace"
-
-[[package]]
-name = "rustc-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
@@ -6318,18 +6297,6 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "which"
-version = "4.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
-dependencies = [
- "either",
- "home",
- "once_cell",
- "rustix 0.38.44",
-]
 
 [[package]]
 name = "wiggle"
