@@ -6,6 +6,8 @@
 
 mod agent;
 mod cache;
+#[cfg_attr(not(feature = "gguf"), allow(dead_code))]
+mod chat;
 mod config;
 #[cfg(feature = "diffusers")]
 mod diffusers;

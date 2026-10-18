@@ -323,6 +323,10 @@ pub struct JobOutput {
     pub seq: u64,
     pub chunk: String,
     pub is_final: bool,
+    /// Structured OpenAI-style delta (reasoning, tool calls) that is not
+    /// plain answer text. Omitted for ordinary text chunks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<serde_json::Value>,
 }
 
 /// Job output with image data
@@ -656,13 +660,36 @@ impl NatsAgent {
         chunk: &str,
         is_final: bool,
     ) -> Result<()> {
-        let msg = JobOutput {
+        self.send_output(JobOutput {
             job_id: job_id.to_string(),
             seq,
             chunk: chunk.to_string(),
             is_final,
-        };
+            delta: None,
+        })
+        .await
+    }
 
+    /// Publish a structured delta (reasoning or tool-call fragments)
+    #[cfg_attr(not(feature = "gguf"), allow(dead_code))]
+    pub async fn publish_output_delta(
+        &self,
+        job_id: &str,
+        seq: u64,
+        delta: serde_json::Value,
+        is_final: bool,
+    ) -> Result<()> {
+        self.send_output(JobOutput {
+            job_id: job_id.to_string(),
+            seq,
+            chunk: String::new(),
+            is_final,
+            delta: Some(delta),
+        })
+        .await
+    }
+
+    async fn send_output(&self, msg: JobOutput) -> Result<()> {
         let payload = serde_json::to_vec(&msg).context("Failed to serialize output")?;
 
         self.client
@@ -1456,12 +1483,31 @@ mod tests {
             seq: 42,
             chunk: "Hello world".to_string(),
             is_final: false,
+            delta: None,
         };
         let json_str = serde_json::to_string(&msg).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(v["seq"], 42);
         assert_eq!(v["chunk"], "Hello world");
         assert_eq!(v["is_final"], false);
+        // Plain text chunks keep the original wire shape
+        assert!(v.get("delta").is_none());
+    }
+
+    #[test]
+    fn test_job_output_delta_serialization() {
+        let msg = JobOutput {
+            job_id: "j1".to_string(),
+            seq: 3,
+            chunk: String::new(),
+            is_final: false,
+            delta: Some(
+                serde_json::json!({"tool_calls": [{"index": 0, "function": {"name": "weather"}}]}),
+            ),
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["chunk"], "");
+        assert_eq!(v["delta"]["tool_calls"][0]["function"]["name"], "weather");
     }
 
     #[test]
