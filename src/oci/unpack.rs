@@ -148,7 +148,6 @@ fn handle_whiteout(path_str: &str, rootfs_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     /// Helper: create a tar.gz at `path` from a list of (entry_name, content) pairs.
     fn create_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
