@@ -48,12 +48,14 @@ jobs:
             binary_name: island
             crun_arch: amd64
 
+          # Native ARM runner: cross's image lacks the cmake/libclang that
+          # llama.cpp needs. 22.04 keeps glibc at 2.35 (Raspberry Pi OS
+          # Bookworm ships 2.36).
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04-arm
             platform: linux-aarch64
-            # llama.cpp needs cmake and libclang, which the cross image lacks
-            features: diffusers
-            use_cross: true
+            features: diffusers,gguf
+            use_cross: false
             binary_name: island
             crun_arch: arm64
 
