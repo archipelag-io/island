@@ -104,9 +104,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-gguf-cargo-${{ hashFiles('Cargo.lock') }}
+          # Arch too: x86 and ARM Linux runners must not share cargo binaries
+          key: ${{ runner.os }}-${{ runner.arch }}-gguf-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-gguf-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-gguf-cargo-
 
       - name: Clippy (gguf feature)
         run: cargo clippy --all-targets --features gguf -- -D warnings
