@@ -488,6 +488,10 @@ impl Agent {
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
 
+        // Free the cached llama.cpp model before the GPU backend tears down
+        #[cfg(feature = "gguf")]
+        crate::gguf::unload_model();
+
         info!("Agent shutdown complete");
         Ok(())
     }
@@ -1492,10 +1496,11 @@ pub(crate) fn compute_performance_estimates_from_capabilities(
     // this agent links neither PrismML's `q1_0` fork, Microsoft's `bitnet.cpp`,
     // nor an AWQ/EXL2 runtime, so advertising those would route jobs it cannot
     // run. They get added here as those executors land.
-    #[allow(unused_mut)]
-    let mut quantization_formats: Vec<String> = Vec::new();
-    #[cfg(feature = "gguf")]
-    quantization_formats.push("gguf".to_string());
+    let quantization_formats: Vec<String> = if cfg!(feature = "gguf") {
+        vec!["gguf".to_string()]
+    } else {
+        Vec::new()
+    };
 
     PerformanceEstimates {
         gpu_bandwidth_gb_s: gpu_bw,

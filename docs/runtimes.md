@@ -38,7 +38,7 @@ Each feature pulls in its own dependencies:
 | Feature | Key dependencies |
 |---------|-----------------|
 | `onnx` | `ort` (ONNX Runtime), `ndarray`, `tokenizers`, `image`, `base64` |
-| `gguf` | `llama_cpp` (llama.cpp bindings) |
+| `gguf` | `llama-cpp-2` (llama.cpp bindings) |
 | `diffusers` | `candle-core`, `candle-transformers`, `candle-nn`, `tokenizers`, `image`, `base64`, `hf-hub` |
 | `all-runtimes` | All of the above plus `pipeline` |
 
@@ -89,9 +89,9 @@ Unrecognized task types fall back to text-classification.
 
 ## GGUF Runtime (llmcpp)
 
-**Source:** `src/gguf.rs`
+**Source:** `src/gguf.rs`, `src/chat.rs`
 
-Executes GGUF-format language models using `llama_cpp` (Rust bindings to llama.cpp). Streams tokens back to the Consumer in real time.
+Executes GGUF-format language models with `llama-cpp-2` (Rust bindings to llama.cpp). Streams output back to the Consumer in real time, including tool calls and reasoning.
 
 ### AssignJob Fields
 
@@ -99,36 +99,65 @@ Executes GGUF-format language models using `llama_cpp` (Rust bindings to llama.c
 |-------|----------|-------------|
 | `model_url` | yes | Model URI (`hf://repo_id`, `hf://repo_id:file.gguf`, or `https://...`) |
 | `model_hash` | no | Expected SHA256 hash for verification |
-| `model_context_size` | no | Context window size (default: 2048) |
-| `model_temperature` | no | Sampling temperature (default: 0.7) |
-| `input` | yes | JSON with prompt content (see below) |
+| `model_context_size` | no | Context window size (default: 4096, capped at the model's training context) |
+| `model_temperature` | no | Cargo default temperature (default: 0.7) |
+| `input` | yes | JSON with the request (see below) |
 
 ### Input Format
 
-The runtime accepts three prompt formats, checked in order:
+**Chat (`messages`)**: an OpenAI-compatible request. The messages are rendered with the model's own chat template (Jinja, from the GGUF metadata), so multi-turn history, `tool` results and assistant `tool_calls` reach the model in the format it was trained on. Supported fields:
 
-1. **`prompt`** (string) -- Raw prompt text, passed directly to the model.
-2. **`messages`** (array) -- OpenAI chat format. Converted to Llama 2 instruction format:
-   - `system` messages become `[INST] <<SYS>>\n...\n<</SYS>>\n\n`
-   - `user` messages become `[INST] ... [/INST]`
-   - `assistant` messages become `... </s>`
-3. **`text`** (string) -- Fallback, treated as raw prompt.
+| Field | Description |
+|-------|-------------|
+| `messages` | OpenAI messages, including `tool_calls` and `tool_call_id` |
+| `tools` | OpenAI function definitions |
+| `tool_choice` | `auto`, `none`, `required`, or `{"type":"function","function":{"name":...}}` |
+| `parallel_tool_calls` | Allow several calls in one turn (default `false`) |
+| `response_format` | `{"type":"json_object"}` or `{"type":"json_schema","json_schema":{"schema":...}}` |
+| `enable_thinking` | Let reasoning models think first (default `true`) |
+| `temperature`, `top_p`, `seed` | Sampling; `temperature: 0` is greedy |
+| `max_tokens` / `max_completion_tokens` | Generation limit (default 1024) |
+| `stop` | String or array of stop sequences |
 
-The `max_tokens` field inside `input` controls the maximum number of generated tokens (default: 1024).
+When tools or a JSON schema are present, llama.cpp generates a grammar that keeps the output valid. For tools it is lazy: it only engages once the model starts a tool call, so ordinary answers are unaffected. Models without a chat template fall back to ChatML.
+
+**Prompt (`prompt` or `text`)**: raw text passed to the model as-is, with the same sampling fields.
+
+### Output
+
+Each NATS output message is `{job_id, seq, chunk, is_final}`:
+
+- Answer text arrives in `chunk`, as before.
+- Reasoning and tool-call fragments arrive with an empty `chunk` and a `delta` field holding an OpenAI streaming delta, e.g. `{"reasoning_content": "..."}` or `{"tool_calls": [{"index": 0, "id": "...", "function": {"name": "get_weather", "arguments": "{\"ci"}}]}`.
+- The final message (`is_final: true`) has a JSON `chunk`:
+
+```json
+{
+  "type": "done",
+  "finish_reason": "stop | length | tool_calls",
+  "usage": {"prompt_tokens": 42, "completion_tokens": 17, "total_tokens": 59},
+  "message": {"role": "assistant", "content": "...", "reasoning_content": "...", "tool_calls": [...]}
+}
+```
+
+`message` is the parsed final assistant message (chat inputs only) and is the authoritative source for tool calls.
 
 ### Behavior
 
 1. Downloads the GGUF model file via the model cache.
-2. Loads the model with `LlamaModel::load_from_file`.
-3. Creates a session with the configured `context_size`.
-4. Configures a sampler with repetition penalty (1.1), top-p (0.9), and the configured temperature.
-5. Generates tokens in a `spawn_blocking` task, streaming each token through an `mpsc` channel.
-6. Each token is published as a separate NATS output message with an incrementing sequence number.
-7. On completion, publishes a final output with `{"type": "done", "usage": {"completion_tokens": N}}`.
+2. Loads the model, or reuses it if the previous Job used the same file. One model stays loaded; llama.cpp's backend is initialized once per process.
+3. Renders the prompt and rejects it with a clear error if it does not fit the context.
+4. Reads the prompt in 512-token batches, then samples with top-k 40, top-p, min-p 0.05, temperature and a per-Job seed, with the grammar first when one is set.
+5. Stops at any end-of-generation token, a stop sequence, cancellation, or the token limit. Text that could be the start of a stop sequence is held back until it is clear it isn't.
+6. Streams output through a 256-slot channel, so back-pressure applies if NATS falls behind.
 
-### Streaming
+### Testing with a real model
 
-Token streaming is real-time: each token is published to NATS as soon as it is generated. The async side reads from a 256-slot `mpsc` channel, so back-pressure is applied if the NATS publisher falls behind.
+The unit tests run without a model. To exercise generation, tool calling, reasoning, stop sequences and JSON output end to end:
+
+```bash
+ISLAND_TEST_GGUF=/path/to/Qwen3-0.6B-Q8_0.gguf cargo test --features gguf gguf::tests -- --include-ignored --test-threads=1
+```
 
 ## Diffusers Runtime
 

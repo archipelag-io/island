@@ -43,6 +43,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             platform: linux-x86_64
+            features: diffusers,gguf
             use_cross: false
             binary_name: island
             crun_arch: amd64
@@ -50,6 +51,8 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             platform: linux-aarch64
+            # llama.cpp needs cmake and libclang, which the cross image lacks
+            features: diffusers
             use_cross: true
             binary_name: island
             crun_arch: arm64
@@ -57,18 +60,21 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-15
             platform: darwin-x86_64
+            features: diffusers,gguf
             use_cross: false
             binary_name: island
 
           - target: aarch64-apple-darwin
             os: macos-14
             platform: darwin-aarch64
+            features: diffusers,gguf
             use_cross: false
             binary_name: island
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             platform: windows-x86_64
+            features: diffusers,gguf
             use_cross: false
             binary_name: island.exe
 
@@ -101,11 +107,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --features diffusers --target ${{ matrix.target }}
+        run: cross build --release --features ${{ matrix.features }} --target ${{ matrix.target }}
 
       - name: Build (native)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --features diffusers --target ${{ matrix.target }}
+        run: cargo build --release --features ${{ matrix.features }} --target ${{ matrix.target }}
 
       - name: Download crun (Linux only)
         if: matrix.crun_arch
