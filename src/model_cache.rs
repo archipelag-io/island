@@ -13,12 +13,23 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::config::ModelCacheConfig;
+
+/// One lock per cache entry, so a Job and a preload asking for the same
+/// model share one download instead of racing on the same file.
+static DOWNLOAD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn download_lock(cache_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = DOWNLOAD_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.entry(cache_key.to_string()).or_default().clone()
+}
 
 /// Metadata for a cached model file
 #[allow(dead_code)]
@@ -125,6 +136,12 @@ impl ModelCache {
 
         let cache_key = url_to_cache_key(download_url);
         let model_dir = self.cache_dir.join(&cache_key);
+        let filename = &resolved.filename;
+        let model_path = model_dir.join(filename);
+
+        // Wait for any download of this model already in progress
+        let lock = download_lock(&cache_key);
+        let _guard = lock.lock().await;
 
         // Check if already cached
         {
@@ -137,6 +154,23 @@ impl ModelCache {
                     return Ok(entry.path.clone());
                 }
             }
+
+            // Finished by a download that held the lock before us
+            if let Ok(meta) = std::fs::metadata(&model_path) {
+                if meta.is_file() && expected_hash.is_none_or(|h| h.is_empty()) {
+                    info!("Model cache hit (just downloaded): {}", display_name);
+                    entries.insert(
+                        cache_key.clone(),
+                        CachedModel {
+                            path: model_path.clone(),
+                            size_bytes: meta.len(),
+                            last_used: SystemTime::now(),
+                            url: uri.to_string(),
+                        },
+                    );
+                    return Ok(model_path);
+                }
+            }
         }
 
         info!("Downloading model: {} ({})", display_name, download_url);
@@ -147,9 +181,9 @@ impl ModelCache {
         std::fs::create_dir_all(&model_dir)
             .with_context(|| format!("Failed to create model dir: {}", model_dir.display()))?;
 
-        let filename = &resolved.filename;
-        let model_path = model_dir.join(filename);
-        let tmp_path = model_dir.join(format!("{}.tmp", filename));
+        // A unique temp name, so an interrupted or overlapping download can
+        // never truncate another one's file
+        let tmp_path = model_dir.join(format!("{}.{:016x}.tmp", filename, rand::random::<u64>()));
 
         // Streaming download (with optional HF auth for gated models)
         let client = reqwest::Client::new();
@@ -505,6 +539,72 @@ mod tests {
         assert_eq!(key.len(), 64); // SHA256 hex
         assert_eq!(key, url_to_cache_key("https://example.com/model.gguf"));
         assert_ne!(key, url_to_cache_key("https://example.com/other.gguf"));
+    }
+
+    /// Serves `body` over HTTP, slowly, counting requests
+    async fn slow_server(body: Vec<u8>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    for chunk in body.chunks(body.len() / 4 + 1) {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        socket.write_all(chunk).await.unwrap();
+                    }
+                });
+            }
+        });
+        (format!("http://{}/tiny.gguf", addr), hits)
+    }
+
+    #[tokio::test]
+    async fn concurrent_downloads_of_one_model_share_a_single_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ModelCacheConfig {
+            max_cache_gb: 1,
+            cache_dir: Some(dir.path().to_string_lossy().to_string()),
+            hf_token: None,
+        };
+        let cache = ModelCache::new(&config).unwrap();
+        cache.init().await.unwrap();
+
+        let body: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+        let (url, hits) = slow_server(body.clone()).await;
+
+        // A preload and a Job asking for the same model at the same time
+        let (a, b) = tokio::join!(
+            cache.download_model(&url, None),
+            cache.download_model(&url, None)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+
+        assert_eq!(a, b);
+        assert_eq!(std::fs::read(&a).unwrap(), body);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // No temp files left behind
+        let leftovers: Vec<_> = std::fs::read_dir(a.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
