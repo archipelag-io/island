@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-18
+
 ### Added
+- Chat Jobs use the model's own chat template, with OpenAI-style `tools`,
+  `tool_choice` and `response_format`; tool calls are constrained by a lazy
+  grammar and returned as `tool_calls` in the final event
+- Streamed output carries a `delta` (content, reasoning or tool-call parts)
+- Reasoning models: thinking is returned separately as `reasoning_content`
+  (`enable_thinking` to turn it off)
+- llama.cpp (GGUF) runtime in every native release build, including Linux ARM
+- Exo multi-Island cluster runtime
+- `[host.capability_overrides]` for lab and staging capability simulation
+- Heartbeats advertise `supported_quantization_formats`
+
+### Changed
+- Prompts are decoded in batches and the loaded model is cached between Jobs
+
+### Fixed
+- Grammar-constrained sampling no longer accepts each token twice (crashed
+  with `GGML_ASSERT(!stacks.empty())`)
+- Concurrent downloads of the same model no longer corrupt each other
+- The model is unloaded on shutdown, avoiding a Metal assert at exit
+
+## [0.5.0] - 2026-03-19
+
+### Added
+- Modern GGUF runtime (llama-cpp-2 0.1.139), pipeline execution, market pricing
 - PR template with Island-specific checklist items
 - Issue templates (bug report, feature request, security vulnerability)
 
