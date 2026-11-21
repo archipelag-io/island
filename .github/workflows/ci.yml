@@ -82,6 +82,11 @@ jobs:
   ci-gguf:
     name: llama.cpp runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # llama.cpp's vendored cpp-httplib doesn't compile against the OpenSSL headers on
+      # macos-15 (const X509_NAME*). The Island downloads models itself and never uses
+      # llama.cpp's HTTPS, so build it without OpenSSL.
+      CMAKE_DISABLE_FIND_PACKAGE_OpenSSL: "TRUE"
     strategy:
       fail-fast: false
       matrix:

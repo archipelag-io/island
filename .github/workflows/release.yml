@@ -9,6 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # See ci.yml: llama.cpp's cpp-httplib breaks against macos-15's OpenSSL headers.
+  CMAKE_DISABLE_FIND_PACKAGE_OpenSSL: "TRUE"
 
 jobs:
   # Validate that tag version matches Cargo.toml
