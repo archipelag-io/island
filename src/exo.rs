@@ -482,19 +482,21 @@ async fn place_model(
     anyhow::bail!("instance/await returned no event")
 }
 
-/// FastAPI errors come as `{"detail": ...}`; fall back to the raw body.
+/// Exo's API reports errors as `{"error": {"message": ...}}`; plain FastAPI
+/// validation errors come as `{"detail": ...}`. Fall back to the raw body.
 fn error_detail(body: &str) -> String {
-    let detail = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("detail").cloned())
+    let v = serde_json::from_str::<serde_json::Value>(body).ok();
+    let detail = v
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message").or_else(|| v.get("detail")))
         .map(|d| {
             d.as_str()
                 .map(String::from)
                 .unwrap_or_else(|| d.to_string())
         });
-    let mut s = detail.unwrap_or_else(|| body.to_string());
-    s.truncate(500);
-    s
+    let s = detail.unwrap_or_else(|| body.to_string());
+    // Cut at a character boundary: `String::truncate` panics inside a multi-byte char.
+    s.chars().take(500).collect()
 }
 
 /// Primary node: drive inference against the local Exo API and relay tokens.
@@ -813,5 +815,21 @@ mod tests {
             "not enough memory"
         );
         assert_eq!(error_detail("plain text"), "plain text");
+    }
+
+    #[test]
+    fn error_detail_extracts_exo_error_message() {
+        // Shape captured from a live Exo node (Nov 2026).
+        let body = r#"{"error":{"message":"Needs 3 connected nodes, but at most 2 are connected to each other","type":"Bad Request","param":null,"code":400}}"#;
+        assert_eq!(
+            error_detail(body),
+            "Needs 3 connected nodes, but at most 2 are connected to each other"
+        );
+    }
+
+    #[test]
+    fn error_detail_truncates_on_char_boundary() {
+        let long = "ä".repeat(600);
+        assert_eq!(error_detail(&long).chars().count(), 500);
     }
 }
